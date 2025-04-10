@@ -221,6 +221,11 @@ export default function Home() {
                     </div>
                     <span className="ml-3 text-sm text-gray-300 font-medium">Summarizing your content...</span>
                   </div>
+                  <p className="text-xs text-gray-400 mt-2">
+                    {text.length > 10000 
+                      ? "This may take a minute for larger content..."
+                      : "Generating a concise, structured summary..."}
+                  </p>
                 </div>
               </div>
             )}
@@ -252,6 +257,7 @@ export default function Home() {
                   placeholder="Enter code, documentation, or any technical content to summarize..."
                   rows={1}
                   maxLength={100000}
+                  disabled={loading}
                 />
                 <button
                   type="submit"
@@ -259,9 +265,16 @@ export default function Home() {
                   className="absolute right-3 top-1/2 -translate-y-1/2 p-2 text-gray-300 hover:text-white focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed transition-colors rounded-full hover:bg-[#2d3752]"
                   aria-label="Send message"
                 >
-                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-6 h-6">
-                    <path d="M3.478 2.404a.75.75 0 0 0-.926.941l2.432 7.905H13.5a.75.75 0 0 1 0 1.5H4.984l-2.432 7.905a.75.75 0 0 0 .926.94 60.519 60.519 0 0 0 18.445-8.986.75.75 0 0 0 0-1.218A60.517 60.517 0 0 0 3.478 2.404Z" />
-                  </svg>
+                  {loading ? (
+                    <svg className="animate-spin h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                  ) : (
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-6 h-6">
+                      <path d="M3.478 2.404a.75.75 0 0 0-.926.941l2.432 7.905H13.5a.75.75 0 0 1 0 1.5H4.984l-2.432 7.905a.75.75 0 0 0 .926.94 60.519 60.519 0 0 0 18.445-8.986.75.75 0 0 0 0-1.218A60.517 60.517 0 0 0 3.478 2.404Z" />
+                    </svg>
+                  )}
                 </button>
               </div>
               {text.length > 75000 && (

@@ -197,6 +197,8 @@ export const RateLimits = {
   
   // Parallel processing optimization
   maxChunksPerRequest: 4, // Increased from 3 for better parallelization
+  maxChunksTotal: 12, // Maximum chunks to process even for very large documents
+  maxBatches: 3, // Maximum number of batches to process
   
   // Optimized chunk size in characters (reduced for faster processing)
   maxChunkSize: 28000, // Reduced from 32000 for better balance
