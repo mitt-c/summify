@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import Anthropic from '@anthropic-ai/sdk';
 import { getAnthropicApiKey, isApiConfigured } from '@/utils/env';
-import { chunkText, extractRateLimitInfo, RateLimits, RateLimitInfo, selectModelForContent } from '@/utils/textProcessing';
+import { chunkText, detectContentType, extractRateLimitInfo, RateLimits, RateLimitInfo, selectModelForContent } from '@/utils/textProcessing';
 
 // Initialize with API key
 const apiKey = getAnthropicApiKey();
@@ -10,6 +10,30 @@ console.log("API Key configured:", isApiConfigured());
 const anthropic = new Anthropic({
   apiKey,
 });
+
+// Prompts used for summarization
+const SYSTEM_PROMPT = `You are an AI Documentation and Code Analysis Agent specializing in extracting key insights from technical content.
+
+Your task is to analyze and summarize technical documents, code, or implementation details in a highly structured format.
+
+You MUST follow these output format requirements:
+1. Begin with a "## Overview" section that provides a high-level summary in 1-3 sentences
+2. Include a "## Key Components" section with bullet points for main components/concepts
+3. Include a "## Implementation Details" section with the most important technical specifics
+4. If applicable, include a "## Usage Example" section showing how to use a component/api/function
+5. End with a "## Limitations and Considerations" section that outlines any constraints or important notes
+
+Use Markdown formatting for all output. Keep the summary clear, concise, and technically accurate.
+Maintain a neutral, professional tone throughout.`;
+
+const SUMMARY_PROMPT = `Analyze and extract key information from the following technical content.
+Return your analysis in the structured format specified in your instructions, using Markdown formatting.
+Focus on the most important concepts, components, and implementation details.`;
+
+const META_SUMMARY_PROMPT = `Below are summaries of different sections of a document or codebase.
+Synthesize these into a single coherent summary that follows the structured format specified in your instructions.
+Ensure a logical flow between sections while maintaining the required markdown formatting.
+Deduplicate overlapping information and prioritize the most important technical insights.`;
 
 // Helper function to safely extract rate limit info from response
 function getRateLimitInfo(response: any): RateLimitInfo {
@@ -28,310 +52,237 @@ function getRateLimitInfo(response: any): RateLimitInfo {
 async function processChunk(text: string) {
   const maxRetries = 3;
   let retryCount = 0;
-  let lastError = null;
-
+  const model = selectModelForContent(text);
+  
+  // Detect if content is primarily code or documentation
+  const contentType = detectContentType(text);
+  // Adapt prompt based on content type
+  let adaptedPrompt = SUMMARY_PROMPT;
+  if (contentType === 'code') {
+    adaptedPrompt = `${SUMMARY_PROMPT}\n\nThis content appears to be code. Focus on architecture, functions, classes, and implementation patterns. Include code structure and key algorithms.`;
+  } else {
+    adaptedPrompt = `${SUMMARY_PROMPT}\n\nThis content appears to be documentation. Focus on concepts, workflows, API details, and usage guidelines.`;
+  }
+  
   while (retryCount < maxRetries) {
     try {
-      console.log(`Processing chunk of ${text.length} characters (attempt ${retryCount + 1})`);
+      const startTime = Date.now();
       
-      const systemPrompt = `You are an expert at summarizing technical information, specializing in extracting key insights from documentation, code, and technical content. 
-Focus on identifying:
-1. Main concepts and their definitions
-2. Core functionality and architecture
-3. Key relationships between components
-4. Important implementation details
-5. Significant constraints or limitations
-
-Your summaries should be well-structured, technically accurate, and preserve the most important information while removing redundancy.`;
-
-      const userPrompt = `Extract and summarize the key information from the following content. 
-Focus on the most important concepts, functionalities, and implementation details.
-Make your summary clear, concise, and technically accurate.
-
-${text}`;
-
-      // Select appropriate model based on content size
-      const model = selectModelForContent(text);
-      console.log(`Using model: ${model} for chunk of size ${text.length}`);
-
       const response = await anthropic.messages.create({
-        model: model,
-        max_tokens: RateLimits.defaultMaxTokens,
-        temperature: RateLimits.defaultTemperature, // Use optimized temperature setting
+        model,
+        max_tokens: 4000,
+        temperature: RateLimits.defaultTemperature,
+        system: SYSTEM_PROMPT,
         messages: [
-          { role: 'user', content: userPrompt }
-        ],
-        system: systemPrompt
+          {
+            role: 'user',
+            content: `${adaptedPrompt} ${text}`
+          }
+        ]
       });
+      
+      const processingTime = Date.now() - startTime;
+      console.log(`${model} processed chunk in ${processingTime}ms`);
+      
+      // Extract rate limit info from response headers if available
+      const rateLimitInfo = getRateLimitInfo(response);
       
       return {
         summary: response.content[0].text,
-        rateLimitInfo: getRateLimitInfo(response),
-        model: model
+        rateLimitInfo,
+        model,
+        processingTime,
+        contentType
       };
-    } catch (error) {
-      lastError = error;
+    } catch (error: any) {
+      retryCount++;
+      const waitTime = 2 ** retryCount * 1000; // Exponential backoff
       
-      // Check if the error is because the service is overloaded (529)
-      if (error instanceof Anthropic.APIError && error.status === 529) {
-        retryCount++;
-        if (retryCount < maxRetries) {
-          // Exponential backoff: wait longer between each retry
-          const backoffMs = 1000 * Math.pow(2, retryCount);
-          console.log(`API overloaded, retrying in ${backoffMs/1000} seconds...`);
-          await new Promise(resolve => setTimeout(resolve, backoffMs));
-          continue;
-        }
+      console.error(`Error processing chunk: ${error.message}`);
+      
+      if (retryCount >= maxRetries) {
+        console.error(`All ${maxRetries} retry attempts failed`);
+        throw error;
       }
       
-      // For other errors or if we've exhausted retries, throw the error
-      console.error("Error processing chunk:", error);
-      throw error;
+      console.log(`Waiting ${waitTime}ms before retry ${retryCount}`);
+      await new Promise(resolve => setTimeout(resolve, waitTime));
     }
   }
   
-  // If we've exhausted retries, throw the last error
-  throw lastError;
+  throw new Error("Failed to process chunk after retries");
 }
 
 // Function to create a meta-summary from individual summaries
 async function createMetaSummary(summaries: string[]) {
   const maxRetries = 3;
   let retryCount = 0;
-  let lastError = null;
-
+  const combinedSummaries = summaries.join("\n\n---\n\n");
+  const model = selectModelForContent(combinedSummaries);
+  
+  // Determine if we're summarizing mostly code or documentation
+  const contentType = detectContentType(combinedSummaries);
+  let adaptedMetaPrompt = META_SUMMARY_PROMPT;
+  
+  if (contentType === 'code') {
+    adaptedMetaPrompt = `${META_SUMMARY_PROMPT}\n\nThis summary is primarily about code. Ensure your meta-summary emphasizes architecture, functions, and implementation patterns. Maintain the structured format.`;
+  } else {
+    adaptedMetaPrompt = `${META_SUMMARY_PROMPT}\n\nThis summary is primarily about documentation. Ensure your meta-summary emphasizes concepts, workflows, and usage guidelines. Maintain the structured format.`;
+  }
+  
+  console.log(`Creating meta-summary from ${summaries.length} chunks`);
+  
   while (retryCount < maxRetries) {
     try {
-      console.log(`Creating meta-summary from ${summaries.length} summaries (attempt ${retryCount + 1})`);
-      
-      const systemPrompt = `You are an expert at synthesizing information from multiple summaries into a cohesive whole. 
-Your task is to create a well-structured, comprehensive summary that integrates key insights from all source summaries.
-Eliminate redundancy while preserving the most important technical information.`;
-
-      const userPrompt = `Below are summaries of different sections of a document or codebase. 
-Please synthesize these into a single coherent summary that captures all the important aspects.
-Structure your summary logically with clear sections.
-
-${summaries.join('\n\n--- NEXT SECTION ---\n\n')}`;
-
-      // Always use Sonnet for meta-summaries to ensure high quality integration
-      const model = 'claude-3-5-sonnet-20240620';
-      console.log(`Using model: ${model} for meta-summary`);
-
+      const startTime = Date.now();
       const response = await anthropic.messages.create({
-        model: model,
-        max_tokens: RateLimits.metaSummaryMaxTokens,
-        temperature: RateLimits.metaSummaryTemperature, // Use optimized temperature setting
+        model,
+        max_tokens: 4000,
+        temperature: RateLimits.metaSummaryTemperature,
+        system: SYSTEM_PROMPT,
         messages: [
-          { role: 'user', content: userPrompt }
-        ],
-        system: systemPrompt
+          {
+            role: 'user',
+            content: `${adaptedMetaPrompt} Here are the individual summaries:\n\n${combinedSummaries}`
+          }
+        ]
       });
+      
+      const processingTime = Date.now() - startTime;
+      console.log(`Meta-summary created in ${processingTime}ms using ${model}`);
+      
+      // Extract rate limit info
+      const rateLimitInfo = getRateLimitInfo(response);
       
       return {
         summary: response.content[0].text,
-        rateLimitInfo: getRateLimitInfo(response),
-        model: model
+        rateLimitInfo,
+        model,
+        processingTime,
+        contentType
       };
-    } catch (error) {
-      lastError = error;
+    } catch (error: any) {
+      retryCount++;
+      const waitTime = 2 ** retryCount * 1000; // Exponential backoff
       
-      // Check if the error is because the service is overloaded (529)
-      if (error instanceof Anthropic.APIError && error.status === 529) {
-        retryCount++;
-        if (retryCount < maxRetries) {
-          // Exponential backoff: wait longer between each retry
-          const backoffMs = 1000 * Math.pow(2, retryCount);
-          console.log(`API overloaded, retrying meta-summary in ${backoffMs/1000} seconds...`);
-          await new Promise(resolve => setTimeout(resolve, backoffMs));
-          continue;
-        }
+      console.error(`Error creating meta-summary: ${error.message}`);
+      
+      if (retryCount >= maxRetries) {
+        console.error(`All ${maxRetries} retry attempts failed for meta-summary`);
+        throw error;
       }
       
-      // For other errors or if we've exhausted retries, throw the error
-      console.error("Error creating meta-summary:", error);
-      throw error;
+      console.log(`Waiting ${waitTime}ms before meta-summary retry ${retryCount}`);
+      await new Promise(resolve => setTimeout(resolve, waitTime));
     }
   }
   
-  // If we've exhausted retries, throw the last error
-  throw lastError;
+  throw new Error("Failed to create meta-summary after retries");
 }
 
 export async function POST(request: NextRequest) {
+  if (!isApiConfigured()) {
+    return NextResponse.json({ error: 'API is not configured' }, { status: 401 });
+  }
+
+  const data = await request.json();
+  const { text } = data;
+
+  if (!text) {
+    return NextResponse.json({ error: 'No text provided for summarization' }, { status: 400 });
+  }
+
   try {
-    const { text } = await request.json();
+    const startTime = Date.now();
     
-    if (!text) {
-      return NextResponse.json(
-        { error: 'Text is required' }, 
-        { status: 400 }
-      );
+    // Determine processing strategy based on content size
+    if (text.length <= 10000) {
+      // For small content, process directly
+      const result = await processChunk(text);
+      
+      return NextResponse.json({
+        summary: result.summary,
+        model: result.model,
+        processingTime: `${Date.now() - startTime}ms`,
+        rateLimitInfo: result.rateLimitInfo,
+        contentType: result.contentType
+      });
     }
     
-    if (!isApiConfigured()) {
-      return NextResponse.json(
-        { error: 'API key not configured' },
-        { status: 500 }
-      );
+    // For larger content, use chunking and parallel processing
+    console.log('Chunking text');
+    const chunks = chunkText(text, RateLimits.maxChunkSize);
+    console.log(`Split into ${chunks.length} chunks`);
+
+    // Limit number of chunks to process to manage API costs
+    const chunksToProcess = chunks.slice(0, RateLimits.maxChunksPerRequest);
+    if (chunksToProcess.length < chunks.length) {
+      console.log(`Processing only first ${chunksToProcess.length} of ${chunks.length} chunks`);
     }
 
-    // Process based on text length
-    if (text.length <= 10000) {
-      // For shorter texts, process directly
-      const { summary, rateLimitInfo, model } = await processChunk(text);
-      
-      return NextResponse.json({ 
-        summary,
-        model,
-        rateLimitInfo
-      });
-    } else {
-      // For longer texts, use chunking approach with parallel processing
-      const chunks = chunkText(text, RateLimits.maxChunkSize);
-      const processableChunks = chunks.slice(0, RateLimits.maxChunksPerRequest);
-      console.log(`Processing ${processableChunks.length} chunks out of ${chunks.length} total`);
-      
-      try {
-        // Process chunks in parallel for significant performance improvement
-        console.log("Using parallel processing for chunks");
-        const startTime = Date.now();
-        
-        const chunkResults = await Promise.all(
-          processableChunks.map(chunk => processChunk(chunk))
-        );
-        
-        const processingTime = Date.now() - startTime;
-        console.log(`Parallel processing completed in ${processingTime}ms`);
-        
-        const summaries = chunkResults.map(result => result.summary);
-        const lastRateLimitInfo = chunkResults[chunkResults.length - 1].rateLimitInfo;
-        const usedModel = chunkResults[0].model;
-        
-        // Create meta-summary if needed
-        let finalSummary, finalRateLimitInfo, finalModel;
-        if (summaries.length > 1) {
-          const metaSummaryResult = await createMetaSummary(summaries);
-          finalSummary = metaSummaryResult.summary;
-          finalRateLimitInfo = metaSummaryResult.rateLimitInfo;
-          finalModel = metaSummaryResult.model;
-        } else {
-          finalSummary = summaries[0];
-          finalRateLimitInfo = lastRateLimitInfo;
-          finalModel = usedModel;
-        }
-        
-        return NextResponse.json({ 
-          summary: finalSummary,
-          model: finalModel,
-          chunkCount: chunks.length,
-          processedChunks: summaries.length,
-          processingTime: `${processingTime}ms (parallel)`,
-          rateLimitInfo: finalRateLimitInfo,
-          modelInfo: `Used ${finalModel} for summarization.`
-        });
-      } catch (error) {
-        console.log("Parallel processing failed, falling back to sequential processing", error);
-        
-        // Fall back to sequential processing if parallel fails (e.g., due to rate limits)
-        const startTime = Date.now();
-        let summaries: string[] = [];
-        let lastRateLimitInfo = {};
-        let usedModel = '';
-        
-        // Process each chunk separately
-        for (const chunk of processableChunks) {
-          const { summary, rateLimitInfo, model } = await processChunk(chunk);
-          summaries.push(summary);
-          lastRateLimitInfo = rateLimitInfo;
-          usedModel = model;
-          
-          // Stop if we're getting close to rate limits
-          if (rateLimitInfo.requestsRemaining && rateLimitInfo.requestsRemaining < 3) {
-            console.log("Approaching rate limits, stopping chunk processing");
-            break;
-          }
-        }
-        
-        const processingTime = Date.now() - startTime;
-        console.log(`Sequential processing completed in ${processingTime}ms`);
-        
-        // Create meta-summary if needed
-        let finalSummary, finalRateLimitInfo, finalModel;
-        if (summaries.length > 1) {
-          const metaSummaryResult = await createMetaSummary(summaries);
-          finalSummary = metaSummaryResult.summary;
-          finalRateLimitInfo = metaSummaryResult.rateLimitInfo;
-          finalModel = metaSummaryResult.model;
-        } else {
-          finalSummary = summaries[0];
-          finalRateLimitInfo = lastRateLimitInfo;
-          finalModel = usedModel;
-        }
-        
-        return NextResponse.json({ 
-          summary: finalSummary,
-          model: finalModel,
-          chunkCount: chunks.length,
-          processedChunks: summaries.length,
-          processingTime: `${processingTime}ms (sequential)`,
-          rateLimitInfo: finalRateLimitInfo,
-          modelInfo: `Used ${finalModel} for summarization.`
-        });
+    // Process chunks in parallel
+    console.log('Processing chunks in parallel');
+    const chunkPromises = chunksToProcess.map(chunk => processChunk(chunk));
+    
+    let summaries;
+    try {
+      summaries = await Promise.all(chunkPromises);
+    } catch (error) {
+      // Fall back to sequential processing if parallel fails
+      console.error('Parallel processing failed, falling back to sequential', error);
+      summaries = [];
+      for (const chunk of chunksToProcess) {
+        summaries.push(await processChunk(chunk));
       }
     }
-  } catch (error) {
+    
+    // If only one chunk, return its summary
+    if (summaries.length === 1) {
+      return NextResponse.json({
+        summary: summaries[0].summary,
+        chunkCount: 1,
+        processedChunks: 1,
+        model: summaries[0].model,
+        processingTime: `${Date.now() - startTime}ms`,
+        rateLimitInfo: summaries[0].rateLimitInfo,
+        contentType: summaries[0].contentType
+      });
+    }
+    
+    // For multiple chunks, create a meta-summary
+    const summaryTexts = summaries.map(summary => summary.summary);
+    const metaSummary = await createMetaSummary(summaryTexts);
+    
+    return NextResponse.json({
+      summary: metaSummary.summary,
+      chunkCount: chunks.length,
+      processedChunks: chunksToProcess.length,
+      model: metaSummary.model,
+      processingTime: `${Date.now() - startTime}ms`,
+      rateLimitInfo: metaSummary.rateLimitInfo,
+      contentType: metaSummary.contentType
+    });
+  } catch (error: any) {
     console.error('Error during summarization:', error);
     
-    if (error instanceof Anthropic.APIError) {
-      if (error.status === 401) {
-        return NextResponse.json(
-          { error: 'Invalid API key' },
-          { status: 401 }
-        );
-      }
-      
-      if (error.status === 429) {
-        // Extract retry-after header if available
-        let retrySeconds = 60;
-        
-        // Safely check for headers property
-        const errorHeaders = error.headers as unknown as Headers;
-        if (errorHeaders && typeof errorHeaders.get === 'function') {
-          try {
-            const retryHeader = errorHeaders.get('retry-after');
-            if (retryHeader) {
-              retrySeconds = parseInt(retryHeader, 10) || 60;
-            }
-          } catch (headerError) {
-            console.error('Error accessing headers:', headerError);
-          }
-        }
-        
-        return NextResponse.json(
-          { 
-            error: 'Rate limit exceeded. Please try again later.',
-            retryAfter: retrySeconds
-          },
-          { status: 429 }
-        );
-      }
-      
-      // Handle overloaded API errors (529)
-      if (error.status === 529) {
-        return NextResponse.json(
-          { 
-            error: 'The AI service is currently experiencing high demand. Please try again in a few moments.',
-            isOverloaded: true
-          },
-          { status: 503 }  // Service Unavailable is more appropriate for client display
-        );
-      }
+    // Handle rate limits and overloads specially
+    if (error.status === 429) {
+      const retryAfter = error.headers?.get('retry-after') || 60;
+      return NextResponse.json({ 
+        error: `Rate limit exceeded. Please try again later.`, 
+        retryAfter 
+      }, { status: 429 });
     }
     
-    return NextResponse.json(
-      { error: 'Failed to summarize text' },
-      { status: 500 }
-    );
+    if (error.status === 503) {
+      return NextResponse.json({ 
+        error: `The AI service is currently overloaded. Please try again later.`, 
+        isOverloaded: true 
+      }, { status: 503 });
+    }
+    
+    return NextResponse.json({ 
+      error: `Summarization failed: ${error.message}` 
+    }, { status: 500 });
   }
 } 

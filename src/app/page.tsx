@@ -1,11 +1,13 @@
 'use client';
 
 import { useState, useRef, useEffect } from 'react';
+import ReactMarkdown from 'react-markdown';
 
 interface Message {
   id: string;
   type: 'user' | 'assistant';
   content: string;
+  contentType?: 'code' | 'documentation';
 }
 
 export default function Home() {
@@ -80,6 +82,7 @@ export default function Home() {
     resetTextarea();
     
     try {
+      // Send the request to the API
       const response = await fetch('/api/summarize', {
         method: 'POST',
         headers: {
@@ -104,15 +107,30 @@ export default function Home() {
       const assistantMessage: Message = {
         id: (Date.now() + 1).toString(),
         type: 'assistant',
-        content: data.summary
+        content: data.summary,
+        contentType: data.contentType
       };
       
       setMessages(prev => [...prev, assistantMessage]);
       
       // Build model info string
       let infoText = `Model: ${data.model || 'Unknown'}`;
+      
+      // Add content type if available
+      if (data.contentType) {
+        infoText += ` | Content type: ${data.contentType}`;
+      }
+      
       if (data.chunkCount) {
-        infoText += ` | Text was split into ${data.chunkCount} chunks (processed ${data.processedChunks} chunks)`;
+        infoText += ` | Text was split into ${data.chunkCount} chunks`;
+        if (data.processedChunks && data.processedChunks < data.chunkCount) {
+          infoText += ` (processed ${data.processedChunks} chunks)`;
+        }
+      }
+      
+      // Add processing time if available
+      if (data.processingTime) {
+        infoText += ` | Processing time: ${data.processingTime}`;
       }
       
       // Add rate limit info if available
@@ -175,7 +193,13 @@ export default function Home() {
                       : 'assistant-message'
                   }`}
                 >
-                  <div className="whitespace-pre-wrap overflow-auto max-h-[70vh]">{message.content}</div>
+                  {message.type === 'user' ? (
+                    <div className="whitespace-pre-wrap overflow-auto max-h-[70vh]">{message.content}</div>
+                  ) : (
+                    <div className="markdown-content overflow-auto max-h-[70vh]">
+                      <ReactMarkdown>{message.content}</ReactMarkdown>
+                    </div>
+                  )}
                   
                   {message.type === 'assistant' && modelInfoMap[message.id] && (
                     <div className="mt-2 pt-2 border-t border-gray-700 text-xs text-gray-400">
@@ -188,14 +212,14 @@ export default function Home() {
 
             {loading && (
               <div className="mb-6 flex justify-start">
-                <div className="glass-card rounded-2xl px-6 py-4">
+                <div className="glass-card rounded-2xl px-6 py-4 max-w-md">
                   <div className="flex items-center">
                     <div className="loader-dots flex space-x-2">
                       <div className="w-2 h-2 rounded-full bg-indigo-500 animate-pulse"></div>
                       <div className="w-2 h-2 rounded-full bg-indigo-500 animate-pulse" style={{ animationDelay: '0.2s' }}></div>
                       <div className="w-2 h-2 rounded-full bg-indigo-500 animate-pulse" style={{ animationDelay: '0.4s' }}></div>
                     </div>
-                    <span className="ml-3 text-sm text-gray-400">Summarizing...</span>
+                    <span className="ml-3 text-sm text-gray-300 font-medium">Summarizing your content...</span>
                   </div>
                 </div>
               </div>
