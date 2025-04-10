@@ -7,6 +7,8 @@ export interface SummarizeRequest {
 
 export interface SummarizeResponse {
   summary: string;
+  model?: string;
+  requestId?: string;
 }
 
 export interface ErrorResponse {

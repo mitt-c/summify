@@ -1,8 +1,15 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #0f1729;
+  --foreground: #ffffff;
+  --card-bg: rgba(20, 25, 45, 0.7);
+  --primary: #6366f1;
+  --primary-hover: #4f46e5;
+  --border-color: rgba(255, 255, 255, 0.1);
+  --user-message-bg: #6366f1;
+  --assistant-message-bg: rgba(30, 35, 55, 0.7);
+  --input-bg: #1e2538;
 }
 
 @theme inline {
@@ -22,5 +29,104 @@
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  margin: 0;
+  padding: 0;
+  min-height: 100vh;
+  position: relative;
+  overflow-x: hidden;
+}
+
+/* Animated gradient background */
+body::before {
+  content: "";
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(125deg, #13172b, #080b19, #1e1b4b, #0d1425);
+  background-size: 400% 400%;
+  z-index: -1;
+  animation: gradientAnimation 15s ease infinite;
+}
+
+@keyframes gradientAnimation {
+  0% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+
+/* Modern UI elements */
+.glass-card {
+  background: var(--card-bg);
+  backdrop-filter: blur(10px);
+  border: 1px solid var(--border-color);
+  border-radius: 0.75rem;
+}
+
+.btn-primary {
+  background-color: var(--primary);
+  color: white;
+  transition: all 0.2s ease;
+}
+
+.btn-primary:hover:not(:disabled) {
+  background-color: var(--primary-hover);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);
+}
+
+.btn-primary:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* Message bubbles */
+.user-message {
+  background-color: var(--user-message-bg);
+  color: white;
+  border-radius: 1.5rem 1.5rem 0 1.5rem;
+}
+
+.assistant-message {
+  background-color: var(--assistant-message-bg);
+  color: var(--foreground);
+  border-radius: 1.5rem 1.5rem 1.5rem 0;
+}
+
+/* Input field styles */
+.chat-input {
+  background-color: var(--input-bg);
+  border-radius: 2rem;
+  border: 1px solid var(--border-color);
+  transition: all 0.2s ease;
+  min-height: 56px;
+  max-height: 200px;
+  line-height: 1.5;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+}
+
+.chat-input:focus {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.2), 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.3);
 }
