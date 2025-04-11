@@ -136,27 +136,48 @@ export async function processSingleChunk(chunk: string) {
   // Get the backend URL from environment variable
   const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:3001';
   
-  // Send the request to the backend API
-  const response = await fetch(`${backendUrl}/api/summarize`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ text: chunk }),
-  });
+  // Create an AbortController for timeout handling
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
   
-  if (!response.ok) {
-    const data = await response.json();
-    if (response.status === 429 && data.retryAfter) {
-      throw new Error(`Rate limit exceeded. Please try again in ${data.retryAfter} seconds.`);
+  try {
+    // Send the request to the backend API
+    const response = await fetch(`${backendUrl}/api/summarize`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ text: chunk }),
+      signal: controller.signal
+    });
+    
+    // Clear the timeout
+    clearTimeout(timeoutId);
+    
+    if (!response.ok) {
+      const data = await response.json();
+      if (response.status === 429 && data.retryAfter) {
+        throw new Error(`Rate limit exceeded. Please try again in ${data.retryAfter} seconds.`);
+      }
+      if (response.status === 503 && data.isOverloaded) {
+        throw new Error(`${data.error} This is a temporary issue with the AI service.`);
+      }
+      throw new Error(data.error || 'Failed to summarize');
     }
-    if (response.status === 503 && data.isOverloaded) {
-      throw new Error(`${data.error} This is a temporary issue with the AI service.`);
+    
+    return await response.json();
+  } catch (error: any) {
+    // Clear the timeout to prevent potential memory leaks
+    clearTimeout(timeoutId);
+    
+    // Handle specific abort error
+    if (error.name === 'AbortError') {
+      throw new Error('Request timed out. The backend service may be experiencing high load.');
     }
-    throw new Error(data.error || 'Failed to summarize');
+    
+    // Re-throw other errors
+    throw error;
   }
-  
-  return await response.json();
 }
 
 /**

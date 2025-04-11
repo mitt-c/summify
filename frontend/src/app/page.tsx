@@ -2,7 +2,6 @@
 
 import { useState, useRef, useEffect } from 'react';
 import ReactMarkdown from 'react-markdown';
-import ChunkedTextProcessor from '@/components/ChunkedTextProcessor';
 
 interface Message {
   id: string;
@@ -10,9 +9,6 @@ interface Message {
   content: string;
   contentType?: 'code' | 'documentation';
 }
-
-// Size threshold for client-side chunking (characters)
-const CHUNKING_THRESHOLD = 15000;
 
 export default function Home() {
   const [text, setText] = useState('');
@@ -26,7 +22,6 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [modelInfoMap, setModelInfoMap] = useState<Record<string, string>>({});
-  const [textToChunk, setTextToChunk] = useState<string>('');
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -64,31 +59,6 @@ export default function Home() {
     }
   };
 
-  // Handle completion of chunked processing
-  const handleChunkedProcessingComplete = (result: { summary: string; processedChunks: number; totalChunks: number }) => {
-    // Add assistant response
-    const assistantMessage: Message = {
-      id: Date.now().toString(),
-      type: 'assistant',
-      content: result.summary,
-      contentType: 'code' // Assuming code content
-    };
-    
-    setMessages(prev => [...prev, assistantMessage]);
-    
-    // Build model info string
-    let infoText = `Model: Claude 3.5 Sonnet (Client-side chunking)`;
-    infoText += ` | Processed ${result.processedChunks} chunks`;
-    
-    setModelInfoMap(prev => ({ 
-      ...prev, 
-      [assistantMessage.id]: infoText
-    }));
-    
-    // Clear the chunking text
-    setTextToChunk('');
-  };
-
   const handleSubmit = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     
@@ -105,27 +75,15 @@ export default function Home() {
     
     setMessages(prev => [...prev, userMessage]);
     setText('');
+    setLoading(true);
     setError('');
     
     // Reset textarea height after sending
     resetTextarea();
     
-    // Check if the text exceeds the chunking threshold
-    if (userMessage.content.length > CHUNKING_THRESHOLD) {
-      // Use client-side chunking for large texts
-      setTextToChunk(userMessage.content);
-      return;
-    }
-    
-    // For smaller texts, use the standard API directly
-    setLoading(true);
-    
     try {
-      // Get the backend URL from environment variable
-      const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:3001';
-
-      // Send the request to the backend API
-      const response = await fetch(`${backendUrl}/api/summarize`, {
+      // Send the request to the API
+      const response = await fetch('/api/summarize', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -252,7 +210,6 @@ export default function Home() {
               </div>
             ))}
 
-            {/* Display loading state for direct API calls */}
             {loading && (
               <div className="mb-6 flex justify-start">
                 <div className="glass-card rounded-2xl px-6 py-4 max-w-md">
@@ -271,16 +228,6 @@ export default function Home() {
                   </p>
                 </div>
               </div>
-            )}
-
-            {/* Client-side chunking processor */}
-            {textToChunk && (
-              <ChunkedTextProcessor
-                text={textToChunk}
-                onComplete={handleChunkedProcessingComplete}
-                onError={setError}
-                onProcessingStatusChange={setLoading}
-              />
             )}
 
             {error && (
@@ -333,11 +280,6 @@ export default function Home() {
               {text.length > 75000 && (
                 <div className="text-amber-400 text-xs mt-1 px-2">
                   Large text detected ({text.length.toLocaleString()} characters). Consider breaking into smaller parts for better results.
-                </div>
-              )}
-              {text.length > CHUNKING_THRESHOLD && text.length <= 75000 && (
-                <div className="text-blue-400 text-xs mt-1 px-2">
-                  Text will be processed using client-side chunking to ensure reliability.
                 </div>
               )}
             </form>
