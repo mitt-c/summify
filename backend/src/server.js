@@ -669,19 +669,25 @@ app.post('/api/summarize', async (req, res) => {
   try {
     const startTime = Date.now();
     
-    // Stream initial response to client - improves perceived performance
+    // Set up SSE headers
     res.writeHead(200, {
-      'Content-Type': 'application/json',
-      'Transfer-Encoding': 'chunked',
-      'X-Content-Type-Options': 'nosniff'
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'X-Accel-Buffering': 'no' // Disable buffering for Nginx
     });
     
+    // Helper function to send SSE events
+    const sendEvent = (event, data) => {
+      res.write(`event: ${event}\n`);
+      res.write(`data: ${JSON.stringify(data)}\n\n`);
+    };
+    
     // Send processing started message
-    res.write(JSON.stringify({ 
-      status: 'processing',
+    sendEvent('processing', { 
       message: 'Processing started',
       timestamp: Date.now()
-    }) + '\n');
+    });
     
     // Determine processing strategy based on content size
     if (text.length <= 10000) {
@@ -693,11 +699,12 @@ app.post('/api/summarize', async (req, res) => {
       console.log(`Completed small content summarization in ${totalTime}ms`);
       
       // Send final result
-      res.end(JSON.stringify({
+      sendEvent('result', {
         summary: result.summary,
         model: result.model,
         processingTime: `${totalTime}ms`
-      }));
+      });
+      res.end();
       return;
     }
     
@@ -726,15 +733,13 @@ app.post('/api/summarize', async (req, res) => {
               summaries[chunkIndex] = result.summary;
               
               // Send progress update to client
-              const progress = {
-                status: 'chunk_complete',
+              sendEvent('progress', {
                 chunkIndex: chunkIndex,
                 totalChunks: chunks.length,
                 progress: Math.round(((chunkIndex + 1) / chunks.length) * 100),
                 timestamp: Date.now()
-              };
+              });
               
-              res.write(JSON.stringify(progress) + '\n');
               return result;
             })
         );
@@ -751,13 +756,14 @@ app.post('/api/summarize', async (req, res) => {
       const totalTime = Date.now() - startTime;
       console.log(`Single chunk summary completed in ${totalTime}ms`);
       
-      res.end(JSON.stringify({
+      sendEvent('result', {
         summary: summaries[0],
         chunkCount: chunks.length,
         processedChunks: 1,
         model: 'claude-3-5-haiku-latest',
         processingTime: `${totalTime}ms`
-      }));
+      });
+      res.end();
       return;
     }
     
@@ -771,13 +777,14 @@ app.post('/api/summarize', async (req, res) => {
     console.log(`Complete summarization process finished in ${totalTime}ms`);
     
     // Send final result
-    res.end(JSON.stringify({
+    sendEvent('result', {
       summary: metaSummary.summary,
       chunkCount: chunks.length,
       processedChunks: chunks.length,
       model: metaSummary.model,
       processingTime: `${totalTime}ms`
-    }));
+    });
+    res.end();
   } catch (error) {
     console.error('Error during summarization:', error);
     
@@ -785,25 +792,193 @@ app.post('/api/summarize', async (req, res) => {
     if (error.status === 429) {
       const retryAfter = error.headers?.get('retry-after') || 60;
       console.error(`Rate limit exceeded. Retry after: ${retryAfter}s`);
-      res.end(JSON.stringify({ 
+      res.write(`event: error\ndata: ${JSON.stringify({ 
         error: `Rate limit exceeded. Please try again later.`, 
         retryAfter
-      }));
+      })}\n\n`);
+      res.end();
       return;
     }
     
     if (error.status === 503) {
       console.error('AI service overloaded');
-      res.end(JSON.stringify({ 
+      res.write(`event: error\ndata: ${JSON.stringify({ 
         error: `The AI service is currently overloaded. Please try again later.`, 
         isOverloaded: true 
-      }));
+      })}\n\n`);
+      res.end();
       return;
     }
     
-    res.end(JSON.stringify({ 
+    res.write(`event: error\ndata: ${JSON.stringify({ 
       error: `Summarization failed: ${error.message}`
-    }));
+    })}\n\n`);
+    res.end();
+  }
+});
+
+// SSE endpoint for summarization
+app.get('/api/summarize', async (req, res) => {
+  const { userText } = req.query;
+  
+  if (!userText) {
+    return res.status(400).json({ error: 'No text provided for summarization' });
+  }
+  
+  const text = decodeURIComponent(userText);
+
+  console.log(`==========================================`);
+  console.log(`Starting new summarization request (SSE)`);
+  console.log(`Content length: ${text.length} characters`);
+
+  try {
+    const startTime = Date.now();
+    
+    // Set up SSE headers
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'X-Accel-Buffering': 'no' // Disable buffering for Nginx
+    });
+    
+    // Helper function to send SSE events
+    const sendEvent = (event, data) => {
+      res.write(`event: ${event}\n`);
+      res.write(`data: ${JSON.stringify(data)}\n\n`);
+    };
+    
+    // Send processing started message
+    sendEvent('processing', { 
+      message: 'Processing started',
+      timestamp: Date.now()
+    });
+    
+    // Determine processing strategy based on content size
+    if (text.length <= 10000) {
+      // For small content, process directly
+      console.log(`Small content detected (${text.length} chars). Processing directly.`);
+      const result = await processChunk(text);
+      
+      const totalTime = Date.now() - startTime;
+      console.log(`Completed small content summarization in ${totalTime}ms`);
+      
+      // Send final result
+      sendEvent('result', {
+        summary: result.summary,
+        model: result.model,
+        processingTime: `${totalTime}ms`
+      });
+      res.end();
+      return;
+    }
+    
+    // For larger content, use chunking
+    console.log(`Large content detected (${text.length} chars). Using chunk-based processing.`);
+    console.log('Chunking text...');
+    const chunkStartTime = Date.now();
+    const chunks = chunkText(text, MAX_CHUNK_SIZE);
+    console.log(`Chunking completed in ${Date.now() - chunkStartTime}ms. Split into ${chunks.length} chunks.`);
+
+    // Process chunks with limited parallelism
+    console.log(`Processing ${chunks.length} chunks with parallelism of ${MAX_PARALLEL_CHUNKS}`);
+    const summaries = new Array(chunks.length).fill(null);
+    const processStartTime = Date.now();
+    
+    // Process chunks in batches to limit parallelism
+    for (let i = 0; i < chunks.length; i += MAX_PARALLEL_CHUNKS) {
+      const batch = [];
+      
+      // Create batch of promises for parallel processing
+      for (let j = 0; j < MAX_PARALLEL_CHUNKS && i + j < chunks.length; j++) {
+        const chunkIndex = i + j;
+        batch.push(
+          processChunk(chunks[chunkIndex], chunkIndex)
+            .then(result => {
+              summaries[chunkIndex] = result.summary;
+              
+              // Send progress update to client
+              sendEvent('progress', {
+                chunkIndex: chunkIndex,
+                totalChunks: chunks.length,
+                progress: Math.round(((chunkIndex + 1) / chunks.length) * 100),
+                timestamp: Date.now()
+              });
+              
+              return result;
+            })
+        );
+      }
+      
+      // Wait for current batch to complete before starting next batch
+      await Promise.all(batch);
+    }
+    
+    console.log(`Chunk processing completed in ${Date.now() - processStartTime}ms`);
+    
+    // If only one chunk was processed, return its summary
+    if (summaries.length === 1) {
+      const totalTime = Date.now() - startTime;
+      console.log(`Single chunk summary completed in ${totalTime}ms`);
+      
+      sendEvent('result', {
+        summary: summaries[0],
+        chunkCount: chunks.length,
+        processedChunks: 1,
+        model: 'claude-3-5-haiku-latest',
+        processingTime: `${totalTime}ms`
+      });
+      res.end();
+      return;
+    }
+    
+    // For multiple chunks, create a meta-summary
+    console.log(`Creating meta-summary from ${summaries.length} processed chunks`);
+    const metaSummaryStartTime = Date.now();
+    const metaSummary = await createMetaSummary(summaries, chunks.length);
+    console.log(`Meta-summary creation completed in ${Date.now() - metaSummaryStartTime}ms`);
+    
+    const totalTime = Date.now() - startTime;
+    console.log(`Complete summarization process finished in ${totalTime}ms`);
+    
+    // Send final result
+    sendEvent('result', {
+      summary: metaSummary.summary,
+      chunkCount: chunks.length,
+      processedChunks: chunks.length,
+      model: metaSummary.model,
+      processingTime: `${totalTime}ms`
+    });
+    res.end();
+  } catch (error) {
+    console.error('Error during summarization:', error);
+    
+    // Handle rate limits and overloads specially
+    if (error.status === 429) {
+      const retryAfter = error.headers?.get('retry-after') || 60;
+      console.error(`Rate limit exceeded. Retry after: ${retryAfter}s`);
+      res.write(`event: error\ndata: ${JSON.stringify({ 
+        error: `Rate limit exceeded. Please try again later.`, 
+        retryAfter
+      })}\n\n`);
+      res.end();
+      return;
+    }
+    
+    if (error.status === 503) {
+      console.error('AI service overloaded');
+      res.write(`event: error\ndata: ${JSON.stringify({ 
+        error: `The AI service is currently overloaded. Please try again later.`, 
+        isOverloaded: true 
+      })}\n\n`);
+      res.end();
+      return;
+    }
+    
+    res.write(`event: error\ndata: ${JSON.stringify({ 
+      error: `Summarization failed: ${error.message}`
+    })}\n\n`);
+    res.end();
   }
 });
 

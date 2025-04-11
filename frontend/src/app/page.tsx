@@ -88,140 +88,61 @@ export default function Home() {
     // Reset textarea height after sending
     resetTextarea();
     
+    // Get the backend URL from environment variable
+    const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:3001';
+    
+    // Create placeholder for assistant response
+    const placeholderId = `placeholder-${Date.now()}`;
+    const placeholderMessage: Message = {
+      id: placeholderId,
+      type: 'assistant',
+      content: 'Processing your content...',
+    };
+    
+    setMessages(prev => [...prev, placeholderMessage]);
+
     try {
-      // Get the backend URL from environment variable
-      const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:3001';
+      // Use Server-Sent Events for streaming
+      const eventSource = new EventSource(`${backendUrl}/api/summarize?userText=${encodeURIComponent(userMessage.content)}`);
+      let finalData: any = {};
+      let summary = '';
       
-      // Create placeholder for assistant response
-      const placeholderId = `placeholder-${Date.now()}`;
-      const placeholderMessage: Message = {
-        id: placeholderId,
-        type: 'assistant',
-        content: 'Processing your content...',
-      };
-      
-      setMessages(prev => [...prev, placeholderMessage]);
-      
-      // Send the request directly to the backend API with streaming support
-      const response = await fetch(`${backendUrl}/api/summarize`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ text: userMessage.content }),
+      // Handle different event types
+      eventSource.addEventListener('processing', (event: MessageEvent) => {
+        const data = JSON.parse(event.data);
+        console.log('Processing started:', data);
       });
       
-      if (!response.ok) {
-        const errorData = await response.json();
-        if (response.status === 429 && errorData.retryAfter) {
-          throw new Error(`Rate limit exceeded. Please try again in ${errorData.retryAfter} seconds.`);
-        }
-        if (response.status === 503 && errorData.isOverloaded) {
-          throw new Error(`${errorData.error} This is a temporary issue with the AI service.`);
-        }
-        throw new Error(errorData.error || 'Failed to summarize');
-      }
-      
-      // Handle streaming response if available
-      if (response.headers.get('Transfer-Encoding') === 'chunked') {
-        const reader = response.body?.getReader();
-        const decoder = new TextDecoder();
-        let finalData: any = {};
-        let summary = '';
+      eventSource.addEventListener('progress', (event: MessageEvent) => {
+        const data = JSON.parse(event.data);
+        setProcessingProgress({
+          status: 'processing',
+          progress: data.progress,
+          currentChunk: data.chunkIndex + 1,
+          totalChunks: data.totalChunks
+        });
         
-        if (reader) {
-          try {
-            while (true) {
-              const { done, value } = await reader.read();
-              if (done) break;
-              
-              const chunk = decoder.decode(value, { stream: true });
-              const lines = chunk.split('\n').filter(line => line.trim());
-              
-              for (const line of lines) {
-                try {
-                  const data = JSON.parse(line);
-                  
-                  // Handle progress updates
-                  if (data.status === 'chunk_complete') {
-                    setProcessingProgress({
-                      status: 'processing',
-                      progress: data.progress,
-                      currentChunk: data.chunkIndex + 1,
-                      totalChunks: data.totalChunks
-                    });
-                    
-                    // Update placeholder message to show progress
-                    setMessages(prev => 
-                      prev.map(msg => 
-                        msg.id === placeholderId 
-                          ? { ...msg, content: `Processing... ${data.progress}% complete` }
-                          : msg
-                      )
-                    );
-                  } 
-                  // Handle final result
-                  else if (data.summary) {
-                    finalData = data;
-                    summary = data.summary;
-                  }
-                } catch (e) {
-                  console.error('Error parsing JSON from stream:', e);
-                }
-              }
-            }
-          } finally {
-            reader.releaseLock();
-          }
-        }
+        // Update placeholder message to show progress
+        setMessages(prev => 
+          prev.map(msg => 
+            msg.id === placeholderId 
+              ? { ...msg, content: `Processing... ${data.progress}% complete` }
+              : msg
+          )
+        );
+      });
+      
+      eventSource.addEventListener('result', (event: MessageEvent) => {
+        const data = JSON.parse(event.data);
+        finalData = data;
+        summary = data.summary;
         
         // Create final assistant message with the summary
-        if (summary) {
-          const assistantMessage: Message = {
-            id: (Date.now() + 1).toString(),
-            type: 'assistant',
-            content: summary,
-            contentType: finalData.contentType
-          };
-          
-          // Replace placeholder with actual response
-          setMessages(prev => prev.map(msg => 
-            msg.id === placeholderId ? assistantMessage : msg
-          ));
-          
-          // Build model info string
-          let infoText = `Model: ${finalData.model || 'Unknown'}`;
-          
-          // Add content type if available
-          if (finalData.contentType) {
-            infoText += ` | Content type: ${finalData.contentType}`;
-          }
-          
-          if (finalData.chunkCount) {
-            infoText += ` | Text was split into ${finalData.chunkCount} chunks`;
-            if (finalData.processedChunks && finalData.processedChunks < finalData.chunkCount) {
-              infoText += ` (processed ${finalData.processedChunks} chunks)`;
-            }
-          }
-          
-          // Add processing time if available
-          if (finalData.processingTime) {
-            infoText += ` | Processing time: ${finalData.processingTime}`;
-          }
-          
-          setModelInfoMap(prev => ({ ...prev, [assistantMessage.id]: infoText }));
-          setProcessingProgress(null);
-        }
-      } else {
-        // Fallback to non-streaming response
-        const data = await response.json();
-        
-        // Add assistant response
         const assistantMessage: Message = {
           id: (Date.now() + 1).toString(),
           type: 'assistant',
-          content: data.summary,
-          contentType: data.contentType
+          content: summary,
+          contentType: finalData.contentType
         };
         
         // Replace placeholder with actual response
@@ -230,34 +151,64 @@ export default function Home() {
         ));
         
         // Build model info string
-        let infoText = `Model: ${data.model || 'Unknown'}`;
+        let infoText = `Model: ${finalData.model || 'Unknown'}`;
         
         // Add content type if available
-        if (data.contentType) {
-          infoText += ` | Content type: ${data.contentType}`;
+        if (finalData.contentType) {
+          infoText += ` | Content type: ${finalData.contentType}`;
         }
         
-        if (data.chunkCount) {
-          infoText += ` | Text was split into ${data.chunkCount} chunks`;
-          if (data.processedChunks && data.processedChunks < data.chunkCount) {
-            infoText += ` (processed ${data.processedChunks} chunks)`;
+        if (finalData.chunkCount) {
+          infoText += ` | Text was split into ${finalData.chunkCount} chunks`;
+          if (finalData.processedChunks && finalData.processedChunks < finalData.chunkCount) {
+            infoText += ` (processed ${finalData.processedChunks} chunks)`;
           }
         }
         
         // Add processing time if available
-        if (data.processingTime) {
-          infoText += ` | Processing time: ${data.processingTime}`;
+        if (finalData.processingTime) {
+          infoText += ` | Processing time: ${finalData.processingTime}`;
         }
         
         setModelInfoMap(prev => ({ ...prev, [assistantMessage.id]: infoText }));
-      }
+        setProcessingProgress(null);
+        
+        // Close the connection once we have the result
+        eventSource.close();
+      });
+      
+      eventSource.addEventListener('error', (event: MessageEvent) => {
+        console.error('SSE Error:', event);
+        
+        // Try to parse error data if available
+        let errorMessage = 'An error occurred during processing';
+        try {
+          if (event.data) {
+            const errorData = JSON.parse(event.data);
+            errorMessage = errorData.error || errorMessage;
+          }
+        } catch (e) {
+          // Use default error message if parsing fails
+        }
+        
+        setError(errorMessage);
+        setMessages(prev => prev.filter(msg => msg.id !== placeholderId));
+        eventSource.close();
+      });
+      
+      // Handle connection errors
+      eventSource.onerror = (err) => {
+        console.error('EventSource failed:', err);
+        setError('Connection to the server failed');
+        setMessages(prev => prev.filter(msg => msg.id !== placeholderId));
+        eventSource.close();
+      };
     } catch (err) {
       setError(err instanceof Error ? err.message : 'An error occurred');
       // Remove placeholder message on error
       setMessages(prev => prev.filter(msg => !msg.id.startsWith('placeholder-')));
     } finally {
       setLoading(false);
-      setProcessingProgress(null);
     }
   };
 
