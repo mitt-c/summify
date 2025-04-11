@@ -10,10 +10,25 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+// Parse FRONTEND_URL for CORS settings
+const allowedOrigins = process.env.FRONTEND_URL 
+  ? process.env.FRONTEND_URL.split(',').map(origin => origin.trim())
+  : ['*'];
+
 // Middleware
 app.use(cors({
-  origin: process.env.FRONTEND_URL || '*', // Allow specified frontend or all origins in development
-  methods: ['GET', 'POST'],
+  origin: function(origin, callback) {
+    // Allow requests with no origin (like mobile apps, curl, etc.)
+    if (!origin) return callback(null, true);
+    
+    if (allowedOrigins.includes('*') || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      console.warn(`Origin ${origin} not allowed by CORS policy`);
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
 app.use(express.json({ limit: '50mb' })); // Increased limit for larger texts
@@ -214,7 +229,7 @@ function chunkText(text, maxChunkSize = MAX_CHUNK_SIZE) {
 async function processChunk(text, chunkIndex) {
   const maxRetries = 3;
   let retryCount = 0;
-  const model = 'claude-3-5-haiku-20241022';
+  const model = 'claude-3-5-haiku-latest';
   
   // Log start of chunk processing with timing
   const startTime = Date.now();
@@ -455,3 +470,4 @@ app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
   console.log(`API is${process.env.ANTHROPIC_API_KEY ? '' : ' NOT'} configured with Anthropic API key`);
 });
+
