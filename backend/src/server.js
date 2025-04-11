@@ -19,11 +19,19 @@ const allowedOrigins = process.env.FRONTEND_URL
   ? process.env.FRONTEND_URL.split(',').map(origin => origin.trim())
   : ['http://localhost:3000', 'http://localhost:3008', 'http://127.0.0.1:3000', 'http://127.0.0.1:3008'];
 
+// Check if we're in development mode
+const isDevelopment = process.env.NODE_ENV !== 'production';
+
 // Middleware
 app.use(cors({
   origin: function(origin, callback) {
     // For development/debugging - log the origin
     console.log(`Received request from origin: ${origin || 'null/undefined'}`);
+    
+    // In development mode, allow all origins
+    if (isDevelopment) {
+      return callback(null, true);
+    }
     
     // Allow requests with no origin (like mobile apps, curl, etc.)
     if (!origin) return callback(null, true);
@@ -49,8 +57,41 @@ const anthropic = new Anthropic({
 });
 
 // Constants and configuration
-const MAX_CHUNK_SIZE = 15000;
-const MAX_PARALLEL_CHUNKS = 3; // Process up to 3 chunks in parallel
+const MAX_CHUNK_SIZE = process.env.MAX_CHUNK_SIZE ? 
+  parseInt(process.env.MAX_CHUNK_SIZE) : 15000;
+
+// Advanced parallel processing configuration
+const MAX_PARALLEL_CHUNKS = process.env.MAX_PARALLEL_CHUNKS ? 
+  parseInt(process.env.MAX_PARALLEL_CHUNKS) : 10; // Default to 10 instead of 3
+
+// Worker pool configuration
+const MAX_WORKER_POOL_SIZE = process.env.MAX_WORKER_POOL_SIZE ? 
+  parseInt(process.env.MAX_WORKER_POOL_SIZE) : 10;
+
+const MAX_CONCURRENT_REQUESTS = process.env.MAX_CONCURRENT_REQUESTS ? 
+  parseInt(process.env.MAX_CONCURRENT_REQUESTS) : 25;
+
+// Rate limiting configuration
+const API_REQUESTS_PER_MINUTE = process.env.API_REQUESTS_PER_MINUTE ? 
+  parseInt(process.env.API_REQUESTS_PER_MINUTE) : 100;
+
+// Retry configuration
+const MAX_RETRIES = process.env.MAX_RETRIES ? 
+  parseInt(process.env.MAX_RETRIES) : 3;
+
+// Timeout configuration (in milliseconds)
+const REQUEST_TIMEOUT = process.env.REQUEST_TIMEOUT ? 
+  parseInt(process.env.REQUEST_TIMEOUT) : 60000; // 1 minute default
+
+// Log configuration values
+console.log('Server configuration:');
+console.log(`- MAX_CHUNK_SIZE: ${MAX_CHUNK_SIZE}`);
+console.log(`- MAX_PARALLEL_CHUNKS: ${MAX_PARALLEL_CHUNKS}`);
+console.log(`- MAX_WORKER_POOL_SIZE: ${MAX_WORKER_POOL_SIZE}`);
+console.log(`- MAX_CONCURRENT_REQUESTS: ${MAX_CONCURRENT_REQUESTS}`);
+console.log(`- API_REQUESTS_PER_MINUTE: ${API_REQUESTS_PER_MINUTE}`);
+console.log(`- MAX_RETRIES: ${MAX_RETRIES}`);
+console.log(`- REQUEST_TIMEOUT: ${REQUEST_TIMEOUT}ms`);
 
 // Prompts used for summarization
 const SYSTEM_PROMPT = `You are an AI Technical Content Summarizer specializing in making complex code and documentation immediately useful to developers.
@@ -416,6 +457,23 @@ A complete authentication system with both client and server components providin
 `;
 
 // Helper functions
+// Function to get optimal chunk size based on text length
+function getOptimalChunkSize(textLength) {
+  if (textLength < 10000) {
+    return textLength; // Don't chunk very small documents
+  } else if (textLength < 30000) {
+    // For medium docs, use 2-3 evenly sized chunks
+    return Math.ceil(textLength / 2);
+  } else if (textLength < 50000) {
+    return Math.ceil(textLength / 3);
+  } else if (textLength < 100000) {
+    return Math.ceil(textLength / 4);
+  } else {
+    // For very large docs, use larger chunks but don't exceed max
+    return Math.min(MAX_CHUNK_SIZE, Math.ceil(textLength / 5));
+  }
+}
+
 /**
  * Breaks text into chunks of approximately the specified size
  * Tries to break at meaningful boundaries (paragraphs, sentences, or code blocks)
@@ -425,7 +483,11 @@ function chunkText(text, maxChunkSize = MAX_CHUNK_SIZE) {
   if (text.length <= maxChunkSize) {
     return [text];
   }
-
+  
+  // Calculate optimal chunk size based on text length
+  const optimalChunkSize = getOptimalChunkSize(text.length);
+  const effectiveChunkSize = Math.min(maxChunkSize, optimalChunkSize);
+  
   const chunks = [];
   let currentIndex = 0;
   
@@ -451,7 +513,7 @@ function chunkText(text, maxChunkSize = MAX_CHUNK_SIZE) {
 
   while (currentIndex < text.length) {
     // Determine end of this chunk
-    let endIndex = Math.min(currentIndex + maxChunkSize, text.length);
+    let endIndex = Math.min(currentIndex + effectiveChunkSize, text.length);
     let bestBoundary = endIndex;
     let boundaryQuality = 0;
     
@@ -529,23 +591,34 @@ function chunkText(text, maxChunkSize = MAX_CHUNK_SIZE) {
   return chunks;
 }
 
-/**
- * Process a single chunk of text with retry logic
- */
+// Enhanced chunk processing with worker pool and rate limiting
+async function processChunkWithWorker(text, chunkIndex) {
+  // Create task function
+  const taskFn = async () => {
+    // Wait for rate limiting with minimal logging
+    await rateLimiter.waitForAvailableSlot();
+    
+    // Execute the actual processing
+    const result = await processChunk(text, chunkIndex);
+    return result;
+  };
+  
+  // Add task to worker pool
+  const priority = chunkIndex !== undefined ? (1000 - chunkIndex) : 1000;
+  
+  // Submit to worker pool and return result
+  return workerPool.addTask(taskFn, priority, MAX_RETRIES);
+}
+
+// Process a single chunk of text with retry logic
 async function processChunk(text, chunkIndex) {
-  const maxRetries = 3;
+  const maxRetries = MAX_RETRIES;
   let retryCount = 0;
   // Use Claude 3.5 Haiku for speed
   const model = 'claude-3-5-haiku-20241022';
   
-  // Log start of chunk processing with timing
-  const startTime = Date.now();
-  console.log(`[Chunk ${chunkIndex !== undefined ? chunkIndex + 1 : 'single'}] Starting processing (${text.length} chars) with ${model}`);
-  
   while (retryCount < maxRetries) {
     try {
-      const apiStartTime = Date.now();
-      
       const response = await anthropic.messages.create({
         model,
         max_tokens: 1500,
@@ -559,28 +632,19 @@ async function processChunk(text, chunkIndex) {
         ]
       });
       
-      const processingTime = Date.now() - apiStartTime;
-      const totalTime = Date.now() - startTime;
-      console.log(`[Chunk ${chunkIndex !== undefined ? chunkIndex + 1 : 'single'}] API call completed in ${processingTime}ms (total: ${totalTime}ms)`);
-      
       return {
         summary: response.content[0].text,
-        model,
-        processingTime,
-        chunkIndex
+        model
       };
     } catch (error) {
       retryCount++;
-      const waitTime = 2 ** retryCount * 1000; // Exponential backoff
-      
-      console.error(`[Chunk ${chunkIndex !== undefined ? chunkIndex + 1 : 'single'}] Error: ${error.message}`);
       
       if (retryCount >= maxRetries) {
-        console.error(`[Chunk ${chunkIndex !== undefined ? chunkIndex + 1 : 'single'}] All ${maxRetries} retry attempts failed`);
+        console.error(`Chunk ${chunkIndex !== undefined ? chunkIndex + 1 : 'single'}: All ${maxRetries} retry attempts failed`);
         throw error;
       }
       
-      console.log(`[Chunk ${chunkIndex !== undefined ? chunkIndex + 1 : 'single'}] Waiting ${waitTime}ms before retry ${retryCount}`);
+      const waitTime = 2 ** retryCount * 1000; // Exponential backoff
       await new Promise(resolve => setTimeout(resolve, waitTime));
     }
   }
@@ -588,10 +652,785 @@ async function processChunk(text, chunkIndex) {
   throw new Error("Failed to process chunk after retries");
 }
 
-/**
- * Create a meta-summary from individual summaries
- */
+// Worker pool implementation for parallel processing
+class WorkerPool {
+  constructor(size = 5, maxConcurrentRequests = 20) {
+    this.size = Math.min(size, maxConcurrentRequests);
+    this.tasks = [];
+    this.workers = Array(this.size).fill().map((_, i) => ({
+      id: i,
+      busy: false,
+      lastTaskTime: 0
+    }));
+    this.maxConcurrentRequests = maxConcurrentRequests;
+    this.activeRequests = 0;
+    this.completedTasks = 0;
+    this.failedTasks = 0;
+    this.requestsPerMinute = 0;
+    this.lastRequestsCount = 0;
+    this.lastCountTime = Date.now();
+    
+    // Minimal metrics - only track what's needed
+    this.metrics = {
+      taskQueuedTimes: new Map()
+    };
+    
+    // Reduce monitoring frequency to once every 5 minutes
+    setInterval(() => this.updateRequestMetrics(), 300000);
+  }
+  
+  updateRequestMetrics() {
+    const now = Date.now();
+    const timeDiffMinutes = (now - this.lastCountTime) / 60000;
+    const newCompletedTasks = this.completedTasks - this.lastRequestsCount;
+    this.requestsPerMinute = newCompletedTasks / timeDiffMinutes;
+    this.lastRequestsCount = this.completedTasks;
+    this.lastCountTime = now;
+    
+    // Only log essential metrics
+    console.log(`[WorkerPool] ${this.requestsPerMinute.toFixed(2)} req/min, ${this.completedTasks} completed`);
+    
+    // Dynamic pool size adjustment based on request rate
+    this.adjustPoolSize();
+  }
+  
+  adjustPoolSize() {
+    // Only adjust if significantly different from current size
+    const targetSize = Math.max(
+      3, 
+      Math.min(
+        Math.ceil(this.requestsPerMinute / 10),
+        this.maxConcurrentRequests
+      )
+    );
+    
+    // Only change if the difference is significant (>25%)
+    if (Math.abs(targetSize - this.size) > Math.max(2, this.size * 0.25)) {
+      console.log(`[WorkerPool] Adjusting pool size: ${this.size} → ${targetSize}`);
+      
+      if (targetSize > this.size) {
+        // Add new workers
+        const newWorkers = Array(targetSize - this.size).fill().map((_, i) => ({
+          id: this.size + i,
+          busy: false,
+          lastTaskTime: 0
+        }));
+        
+        this.workers = [...this.workers, ...newWorkers];
+      } else {
+        // Reduce workers (only the idle ones)
+        this.workers = this.workers
+          .sort((a, b) => a.busy ? 1 : (b.busy ? -1 : 0))
+          .slice(0, targetSize);
+      }
+      
+      this.size = targetSize;
+    }
+  }
+  
+  // Add new task to the queue and process if workers available
+  async addTask(taskFn, priority = 1, maxRetries = 3) {
+    return new Promise((resolve, reject) => {
+      const taskId = Date.now().toString(36) + Math.random().toString(36).substring(2, 5);
+      
+      const task = {
+        id: taskId,
+        fn: taskFn,
+        priority,
+        resolve,
+        reject,
+        added: Date.now(),
+        retries: 0,
+        maxRetries
+      };
+      
+      // Record minimal metrics
+      this.metrics.taskQueuedTimes.set(taskId, Date.now());
+      
+      // Add task to queue with priority (higher priority first)
+      this.tasks.push(task);
+      this.tasks.sort((a, b) => b.priority - a.priority);
+      
+      // Try to process tasks immediately
+      this.processQueue();
+    });
+  }
+  
+  // Get available worker
+  getAvailableWorker() {
+    return this.workers.find(w => !w.busy);
+  }
+  
+  // Process tasks in the queue if workers available
+  async processQueue() {
+    // While we have tasks and workers
+    while (this.tasks.length > 0 && this.activeRequests < this.maxConcurrentRequests) {
+      const worker = this.getAvailableWorker();
+      if (!worker) break;
+      
+      // Get next task (already sorted by priority)
+      const task = this.tasks.shift();
+      
+      // Mark worker as busy
+      worker.busy = true;
+      this.activeRequests++;
+      
+      // Execute the task without awaiting (fire and forget)
+      this.executeTask(worker, task);
+    }
+  }
+  
+  // Execute task with the given worker - optimized for minimal overhead
+  async executeTask(worker, task) {
+    try {
+      // Set timeout for long-running tasks
+      const timeout = setTimeout(() => {
+        // Don't abort the task, but free the worker for other tasks
+        worker.busy = false;
+        this.activeRequests--;
+        this.processQueue();
+      }, REQUEST_TIMEOUT);
+      
+      // Execute the task function
+      const result = await task.fn();
+      
+      // Clear timeout
+      clearTimeout(timeout);
+      
+      // Clean up metrics
+      this.metrics.taskQueuedTimes.delete(task.id);
+      
+      // Resolve the promise with the result
+      task.resolve(result);
+      this.completedTasks++;
+    } catch (error) {
+      // Retry logic
+      if (task.retries < task.maxRetries) {
+        task.retries++;
+        
+        // Exponential backoff without logging
+        const backoff = Math.min(30000, 1000 * Math.pow(2, task.retries));
+        
+        // Add back to queue with higher priority for retries
+        setTimeout(() => {
+          this.tasks.unshift({
+            ...task,
+            priority: task.priority + 1 // Increase priority for retries
+          });
+          this.processQueue();
+        }, backoff);
+      } else {
+        // All retries failed, reject the promise
+        task.reject(error);
+        this.failedTasks++;
+        
+        // Clean up metrics
+        this.metrics.taskQueuedTimes.delete(task.id);
+      }
+    } finally {
+      // Mark worker as available
+      worker.busy = false;
+      worker.lastTaskTime = Date.now();
+      this.activeRequests--;
+      
+      // Try to process more tasks
+      this.processQueue();
+    }
+  }
+  
+  // Get pool status - minimal version
+  getStatus() {
+    return {
+      size: this.size,
+      activeRequests: this.activeRequests,
+      queueLength: this.tasks.length,
+      completedTasks: this.completedTasks
+    };
+  }
+}
+
+// Rate limiter for API calls - minimized for performance
+class RateLimiter {
+  constructor(maxRequestsPerMinute = 60) {
+    this.maxRequestsPerMinute = maxRequestsPerMinute;
+    this.requestTimestamps = [];
+    this.waitingQueue = [];
+    this.processing = false;
+  }
+  
+  // Check if we can make a request right now
+  canMakeRequest() {
+    const now = Date.now();
+    
+    // Remove timestamps older than 1 minute
+    this.requestTimestamps = this.requestTimestamps.filter(
+      timestamp => now - timestamp < 60000
+    );
+    
+    // Check if we've made fewer requests than the limit
+    return this.requestTimestamps.length < this.maxRequestsPerMinute;
+  }
+  
+  // Record a request
+  recordRequest() {
+    this.requestTimestamps.push(Date.now());
+  }
+  
+  // Wait until we can make a request
+  async waitForAvailableSlot() {
+    // Fast path: if we can make a request immediately, do so
+    if (this.canMakeRequest()) {
+      this.recordRequest();
+      return Promise.resolve();
+    }
+    
+    // Return a promise that resolves when a slot becomes available
+    return new Promise(resolve => {
+      this.waitingQueue.push(resolve);
+      
+      // Start processing the queue if not already
+      if (!this.processing) {
+        this.processing = true;
+        this.processQueue();
+      }
+    });
+  }
+  
+  // Process the waiting queue - minimized version
+  async processQueue() {
+    // Check every 100ms for available slots
+    const interval = setInterval(() => {
+      if (this.canMakeRequest() && this.waitingQueue.length > 0) {
+        this.recordRequest();
+        const resolve = this.waitingQueue.shift();
+        resolve();
+      }
+      
+      // If queue is empty, stop checking
+      if (this.waitingQueue.length === 0) {
+        clearInterval(interval);
+        this.processing = false;
+      }
+    }, 100);
+  }
+  
+  // Get minimal status
+  getStatus() {
+    return {
+      currentRequests: this.requestTimestamps.length,
+      maxRequests: this.maxRequestsPerMinute,
+      waitingQueue: this.waitingQueue.length
+    };
+  }
+}
+
+// Create pool and rate limiter instances
+const workerPool = new WorkerPool(MAX_WORKER_POOL_SIZE, MAX_CONCURRENT_REQUESTS);
+const rateLimiter = new RateLimiter(API_REQUESTS_PER_MINUTE);
+
+// Log worker pool creation
+console.log(`Created worker pool with ${MAX_WORKER_POOL_SIZE} workers and ${MAX_CONCURRENT_REQUESTS} max concurrent requests`);
+console.log(`Rate limiter configured for ${API_REQUESTS_PER_MINUTE} requests per minute`);
+
+// In-memory store for active sessions
+const activeSessions = new Map();
+
+// Cleanup old sessions periodically
+setInterval(() => {
+  const now = Date.now();
+  for (const [sessionId, session] of activeSessions.entries()) {
+    // Clean up sessions older than 30 minutes
+    if (now - session.createdAt > 30 * 60 * 1000) {
+      console.log(`Session ${sessionId} expired, cleaning up`);
+      activeSessions.delete(sessionId);
+    }
+  }
+}, 5 * 60 * 1000); // Check every 5 minutes
+
+// API Routes
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// Status endpoint for monitoring the worker pool and rate limiter
+app.get('/api/status', (req, res) => {
+  // Get worker pool and rate limiter status
+  const poolStatus = workerPool.getStatus();
+  const rateLimiterStatus = rateLimiter.getStatus();
+  
+  // Calculate system statistics
+  const uptime = process.uptime();
+  const memoryUsage = process.memoryUsage();
+  const formattedMemory = {
+    rss: `${Math.round(memoryUsage.rss / 1024 / 1024)} MB`,
+    heapTotal: `${Math.round(memoryUsage.heapTotal / 1024 / 1024)} MB`,
+    heapUsed: `${Math.round(memoryUsage.heapUsed / 1024 / 1024)} MB`,
+    external: `${Math.round(memoryUsage.external / 1024 / 1024)} MB`
+  };
+  
+  // Count active sessions
+  const activeSesssionCount = activeSessions.size;
+  
+  // Return comprehensive status
+  res.status(200).json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    server: {
+      uptime: `${Math.floor(uptime / 3600)}h ${Math.floor((uptime % 3600) / 60)}m ${Math.floor(uptime % 60)}s`,
+      uptimeSeconds: uptime,
+      memory: formattedMemory,
+      nodeVersion: process.version,
+      environment: process.env.NODE_ENV || 'development'
+    },
+    workerPool: poolStatus,
+    rateLimiter: rateLimiterStatus,
+    sessions: {
+      active: activeSesssionCount
+    }
+  });
+});
+
+// Create session endpoint
+app.post('/api/create-session', async (req, res) => {
+  const { text } = req.body;
+
+  if (!text) {
+    return res.status(400).json({ error: 'No text provided for summarization' });
+  }
+
+  // Generate a unique session ID
+  const sessionId = Date.now().toString(36) + Math.random().toString(36).substring(2, 10);
+  
+  // Store the text in the session
+  activeSessions.set(sessionId, {
+    text,
+    createdAt: Date.now()
+  });
+  
+  console.log(`Created new session ${sessionId} with ${text.length} characters`);
+  
+  // Return the session ID to the client
+  res.status(200).json({ 
+    sessionId,
+    message: 'Session created successfully',
+    textLength: text.length
+  });
+});
+
+// SSE endpoint using session ID
+app.get('/api/summarize-stream', async (req, res) => {
+  // Add request ID for tracking in logs
+  const requestId = Date.now().toString(36) + Math.random().toString(36).substring(2, 7);
+  console.log(`[${requestId}] New SSE connection request received`);
+
+  const { sessionId } = req.query;
+  
+  if (!sessionId) {
+    console.error(`[${requestId}] No session ID provided`);
+    return res.status(400).json({ error: 'No session ID provided' });
+  }
+
+  // Get the text from the session
+  const session = activeSessions.get(sessionId);
+  if (!session) {
+    console.error(`[${requestId}] Invalid or expired session ID: ${sessionId}`);
+    return res.status(404).json({ error: 'Invalid or expired session ID' });
+  }
+
+  const text = session.text;
+  console.log(`[${requestId}] ==========================================`);
+  console.log(`[${requestId}] Starting new summarization request (SSE) from session ${sessionId}`);
+  console.log(`[${requestId}] Content length: ${text.length} characters`);
+
+  // Performance tracking object (kept minimal)
+  const perf = {
+    startTime: Date.now(),
+    timeCheckpoints: {
+      start: Date.now(),
+      end: 0
+    }
+  };
+
+  // Set up SSE headers
+  try {
+    console.log(`[${requestId}] Setting up SSE headers`);
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'X-Accel-Buffering': 'no' // Disable buffering for Nginx
+    });
+  } catch (err) {
+    console.error(`[${requestId}] Error setting SSE headers:`, err);
+    return res.status(500).json({ error: 'Server error setting up connection' });
+  }
+  
+  // Helper function to send SSE events - ONLY USE FOR ESSENTIAL UPDATES
+  const sendEvent = (event, data) => {
+    try {
+      const eventData = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+      return res.write(eventData);
+    } catch (err) {
+      console.error(`[${requestId}] Error sending SSE event '${event}':`, err);
+      return false;
+    }
+  };
+  
+  // Setup heartbeat to keep connection alive (less frequent to reduce overhead)
+  const heartbeatInterval = setInterval(() => {
+    try {
+      sendEvent('heartbeat', { timestamp: Date.now() });
+    } catch (err) {
+      console.error(`[${requestId}] Error in heartbeat:`, err);
+    }
+  }, 30000); // Reduced frequency to 30 seconds
+  
+  // Function to clean up resources when finished
+  const cleanup = () => {
+    console.log(`[${requestId}] Cleaning up resources`);
+    clearInterval(heartbeatInterval);
+    activeSessions.delete(sessionId);
+  };
+  
+  // Handle client disconnection
+  req.on('close', () => {
+    console.log(`[${requestId}] Client disconnected, cleaning up resources`);
+    cleanup();
+  });
+
+  req.on('error', (err) => {
+    console.error(`[${requestId}] Request error:`, err);
+    cleanup();
+  });
+  
+  res.on('error', (err) => {
+    console.error(`[${requestId}] Response error:`, err);
+    cleanup();
+  });
+  
+  try {
+    // Send processing started message - ESSENTIAL
+    sendEvent('processing', { 
+      message: 'Processing started',
+      timestamp: Date.now(),
+      sessionId
+    });
+    
+    // Handle very large documents with a warning - ESSENTIAL
+    if (text.length > 100000) {
+      sendEvent('info', {
+        message: 'Processing a very large document. This may take several minutes.',
+        size: text.length
+      });
+    }
+    
+    // Determine processing strategy based on content size
+    if (text.length <= 10000) {
+      // For small content, process directly
+      console.log(`[${requestId}] Small content detected (${text.length} chars). Processing directly.`);
+      const result = await processChunkWithWorker(text);
+      
+      perf.timeCheckpoints.end = Date.now();
+      const totalTime = perf.timeCheckpoints.end - perf.timeCheckpoints.start;
+      console.log(`[${requestId}] Completed small content summarization in ${totalTime}ms`);
+      
+      // Send final result - ESSENTIAL
+      sendEvent('result', {
+        summary: result.summary,
+        model: result.model,
+        processingTime: `${totalTime}ms`
+      });
+      cleanup();
+      res.end();
+      return;
+    }
+    
+    // For larger content, use chunking with advanced parallel processing
+    console.log(`[${requestId}] Large content detected (${text.length} chars). Using chunk-based processing.`);
+    
+    const chunkStartTime = Date.now();
+    const chunks = chunkText(text, MAX_CHUNK_SIZE);
+    console.log(`[${requestId}] Chunking completed. Split into ${chunks.length} chunks.`);
+
+    // Single notification about chunking - ESSENTIAL
+    sendEvent('info', {
+      message: `Document split into ${chunks.length} chunks. Processing started...`
+    });
+
+    // Determine optimal parallelism strategy
+    let optimalParallelism = MAX_PARALLEL_CHUNKS;
+    
+    // For smaller documents, reduce parallelism to avoid overhead
+    if (chunks.length <= 5) {
+      optimalParallelism = 1;
+    } else if (chunks.length <= 10) {
+      optimalParallelism = Math.min(3, MAX_PARALLEL_CHUNKS);
+    } else {
+      optimalParallelism = Math.min(
+        Math.max(3, Math.ceil(chunks.length / 4)),
+        MAX_CONCURRENT_REQUESTS,
+        chunks.length
+      );
+    }
+    
+    console.log(`[${requestId}] Processing ${chunks.length} chunks with ${optimalParallelism > 1 ? 'parallel' : 'sequential'} processing`);
+    
+    // Array to store summaries in order
+    const summaries = new Array(chunks.length).fill(null);
+    let completedChunks = 0;
+    let failedChunks = 0;
+    
+    // Periodic progress update variables
+    let lastProgressUpdate = Date.now();
+    const PROGRESS_UPDATE_INTERVAL = 5000; // Only update every 5 seconds
+    
+    // Choose processing strategy based on optimal parallelism
+    if (optimalParallelism === 1) {
+      // Process chunks sequentially to avoid overhead
+      for (let i = 0; i < chunks.length; i++) {
+        try {
+          // Process chunk sequentially
+          const result = await processChunkWithWorker(chunks[i], i);
+          
+          // Store summary
+          summaries[i] = result.summary;
+          completedChunks++;
+          
+          // Only send occasional progress updates to reduce overhead
+          const now = Date.now();
+          if (now - lastProgressUpdate > PROGRESS_UPDATE_INTERVAL) {
+            lastProgressUpdate = now;
+            sendEvent('progress', {
+              progress: Math.round(((i + 1) / chunks.length) * 100)
+            });
+          }
+        } catch (err) {
+          console.error(`[${requestId}] Error processing chunk ${i}:`, err);
+          failedChunks++;
+          summaries[i] = `[Error processing this section: ${err.message}]`;
+        }
+      }
+    } else {
+      // Use parallel processing with dynamic worker pool
+      // Use batching with larger batch sizes to reduce overhead
+      const batchSize = optimalParallelism;
+      const batchCount = Math.ceil(chunks.length / batchSize);
+      
+      // Send a single batch count notification - ESSENTIAL
+      if (batchCount > 1) {
+        sendEvent('info', {
+          message: `Processing in ${batchCount} batches...`
+        });
+      }
+      
+      for (let i = 0; i < chunks.length; i += batchSize) {
+        const batch = [];
+        
+        // Create batch of promises for parallel processing
+        for (let j = 0; j < batchSize && i + j < chunks.length; j++) {
+          const chunkIndex = i + j;
+          
+          const processPromise = async () => {
+            try {
+              const result = await processChunkWithWorker(chunks[chunkIndex], chunkIndex);
+              summaries[chunkIndex] = result.summary;
+              completedChunks++;
+              return result;
+            } catch (err) {
+              console.error(`[${requestId}] Error processing chunk ${chunkIndex}:`, err);
+              failedChunks++;
+              summaries[chunkIndex] = `[Error processing this section: ${err.message}]`;
+              return null;
+            }
+          };
+          
+          batch.push(processPromise());
+        }
+        
+        // Wait for current batch to complete before starting next batch
+        await Promise.all(batch);
+        
+        // Only send batch completion events for multi-batch processing - ESSENTIAL
+        if (batchCount > 1) {
+          const batchNumber = Math.floor(i/batchSize) + 1;
+          sendEvent('progress', {
+            message: `Completed batch ${batchNumber} of ${batchCount}`,
+            progress: Math.round(Math.min(((i + batchSize) / chunks.length), 1) * 100)
+          });
+        }
+      }
+    }
+    
+    console.log(`[${requestId}] Chunk processing completed`);
+    console.log(`[${requestId}] Completed chunks: ${completedChunks}, Failed chunks: ${failedChunks}`);
+    
+    // If only one chunk was processed, return its summary
+    if (summaries.length === 1) {
+      perf.timeCheckpoints.end = Date.now();
+      const totalTime = perf.timeCheckpoints.end - perf.timeCheckpoints.start;
+      console.log(`[${requestId}] Single chunk summary completed in ${totalTime}ms`);
+      
+      sendEvent('result', {
+        summary: summaries[0],
+        processingTime: `${totalTime}ms`
+      });
+      cleanup();
+      res.end();
+      return;
+    }
+    
+    // Filter out any null summaries in case some chunks failed
+    const validSummaries = summaries.filter(s => s !== null);
+    if (validSummaries.length === 0) {
+      throw new Error('All chunks failed processing');
+    }
+    
+    // For multiple chunks, create a meta-summary - ESSENTIAL
+    sendEvent('info', {
+      message: 'Creating final summary...'
+    });
+    
+    console.log(`[${requestId}] Creating meta-summary from ${validSummaries.length} processed chunks`);
+    
+    // OPTIMIZATION: For small documents (2-3 chunks), skip the meta-summary process
+    // which is causing the bottleneck (21+ seconds in logs) and just combine the summaries
+    let metaSummary;
+    if (validSummaries.length <= 3) {
+      console.log(`[${requestId}] Using direct combination for small document (${validSummaries.length} chunks)`);
+      
+      // Simply join the summaries with section headers
+      const combinedSummary = validSummaries.map((summary, index) => {
+        if (validSummaries.length === 2) {
+          // For two chunks, label them as first/second part
+          return `## ${index === 0 ? 'First' : 'Second'} Part\n\n${summary}`;
+        } else {
+          // For three chunks, use numbered parts
+          return `## Part ${index + 1}\n\n${summary}`;
+        }
+      }).join('\n\n---\n\n');
+      
+      metaSummary = {
+        summary: combinedSummary,
+        model: 'direct-combination',
+        processingTime: 0
+      };
+    } else {
+      // Use the worker pool for the meta-summary
+      const metaSummaryTask = async () => createMetaSummary(validSummaries, chunks.length);
+      metaSummary = await workerPool.addTask(metaSummaryTask, 2000); // Highest priority
+    }
+    
+    perf.timeCheckpoints.end = Date.now();
+    const totalTime = perf.timeCheckpoints.end - perf.timeCheckpoints.start;
+    console.log(`[${requestId}] Complete summarization process finished in ${totalTime}ms`);
+    
+    // Send final result - ESSENTIAL
+    sendEvent('result', {
+      summary: metaSummary.summary,
+      processingTime: `${totalTime}ms`
+    });
+    cleanup();
+    res.end();
+  } catch (error) {
+    console.error(`[${requestId}] Error during summarization:`, error);
+    
+    // Error messages are ESSENTIAL
+    if (error.status === 429) {
+      sendEvent('error', { 
+        error: `Rate limit exceeded. Please try again later.`
+      });
+    } else if (error.status === 503) {
+      sendEvent('error', { 
+        error: `The AI service is currently overloaded. Please try again later.`
+      });
+    } else if (error.code === 'ETIMEDOUT' || error.code === 'ESOCKETTIMEDOUT' || error.code === 'ECONNABORTED') {
+      sendEvent('error', { 
+        error: `The request timed out. This often happens with very large documents. Try splitting your document into smaller parts.`
+      });
+    } else {
+      sendEvent('error', { 
+        error: `Summarization failed: ${error.message}`
+      });
+    }
+    
+    cleanup();
+    try {
+      res.end();
+    } catch (err) {
+      console.error(`[${requestId}] Error closing connection:`, err);
+    }
+  }
+});
+
+// Original SSE endpoint for backward compatibility
+app.get('/api/summarize', async (req, res) => {
+  // Add request ID for tracking in logs
+  const requestId = Date.now().toString(36) + Math.random().toString(36).substring(2, 7);
+  console.log(`[${requestId}] New SSE connection request received (legacy endpoint)`);
+
+  const { userText } = req.query;
+  
+  if (!userText) {
+    console.error(`[${requestId}] No text provided in request`);
+    return res.status(400).json({ error: 'No text provided for summarization' });
+  }
+
+  try {
+    // Log the request details including query parameter length
+    console.log(`[${requestId}] Query param length: ${req.url.length} characters`);
+    console.log(`[${requestId}] userText param length: ${userText.length} characters`);
+    
+    const text = decodeURIComponent(userText);
+    console.log(`[${requestId}] ==========================================`);
+    console.log(`[${requestId}] Starting new summarization request (legacy SSE endpoint)`);
+    console.log(`[${requestId}] Content length after decoding: ${text.length} characters`);
+    console.log(`[${requestId}] Client IP: ${req.ip || 'unknown'}`);
+    console.log(`[${requestId}] User agent: ${req.headers['user-agent'] || 'unknown'}`);
+
+    // Create a temporary session for this request
+    const sessionId = Date.now().toString(36) + Math.random().toString(36).substring(2, 10);
+    activeSessions.set(sessionId, {
+      text,
+      createdAt: Date.now()
+    });
+    
+    // Redirect to the session-based endpoint 
+    return res.redirect(307, `/api/summarize-stream?sessionId=${sessionId}`);
+  } catch (error) {
+    console.error(`[${requestId}] Error in legacy endpoint:`, error);
+    return res.status(500).json({ 
+      error: `Error processing request: ${error.message}`,
+      message: 'Please use the /api/create-session endpoint for large documents'
+    });
+  }
+});
+
+// Create a meta-summary from individual summaries - optimized version
 async function createMetaSummary(summaries, originalChunkCount) {
+  // OPTIMIZATION: For small documents with just 2-3 chunks, skip meta-summarization
+  // and concatenate summaries with section headers instead
+  if (summaries.length <= 3) {
+    console.log(`Skipping meta-summary for small document (${summaries.length} chunks)`);
+    
+    // Simply join the summaries with section dividers
+    const combinedSummary = summaries.map((summary, index) => {
+      if (summaries.length === 2) {
+        // For two chunks, label them as first/second part
+        return `## ${index === 0 ? 'First' : 'Second'} Part\n\n${summary}`;
+      } else {
+        // For three chunks, use numbered parts
+        return `## Part ${index + 1}\n\n${summary}`;
+      }
+    }).join('\n\n---\n\n');
+    
+    return {
+      summary: combinedSummary,
+      model: 'direct-combination',
+      processingTime: 0
+    };
+  }
+  
   const maxRetries = 3;
   let retryCount = 0;
   
@@ -657,404 +1496,6 @@ Create a single, coherent summary that integrates all sections while maintaining
   
   throw new Error("Failed to create meta-summary after retries");
 }
-
-// In-memory store for active sessions
-const activeSessions = new Map();
-
-// Cleanup old sessions periodically
-setInterval(() => {
-  const now = Date.now();
-  for (const [sessionId, session] of activeSessions.entries()) {
-    // Clean up sessions older than 30 minutes
-    if (now - session.createdAt > 30 * 60 * 1000) {
-      console.log(`Session ${sessionId} expired, cleaning up`);
-      activeSessions.delete(sessionId);
-    }
-  }
-}, 5 * 60 * 1000); // Check every 5 minutes
-
-// API Routes
-// Health check endpoint
-app.get('/health', (req, res) => {
-  res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
-});
-
-// Create session endpoint
-app.post('/api/create-session', async (req, res) => {
-  const { text } = req.body;
-
-  if (!text) {
-    return res.status(400).json({ error: 'No text provided for summarization' });
-  }
-
-  // Generate a unique session ID
-  const sessionId = Date.now().toString(36) + Math.random().toString(36).substring(2, 10);
-  
-  // Store the text in the session
-  activeSessions.set(sessionId, {
-    text,
-    createdAt: Date.now()
-  });
-  
-  console.log(`Created new session ${sessionId} with ${text.length} characters`);
-  
-  // Return the session ID to the client
-  res.status(200).json({ 
-    sessionId,
-    message: 'Session created successfully',
-    textLength: text.length
-  });
-});
-
-// SSE endpoint using session ID
-app.get('/api/summarize-stream', async (req, res) => {
-  // Add request ID for tracking in logs
-  const requestId = Date.now().toString(36) + Math.random().toString(36).substring(2, 7);
-  console.log(`[${requestId}] New SSE connection request received`);
-
-  const { sessionId } = req.query;
-  
-  if (!sessionId) {
-    console.error(`[${requestId}] No session ID provided`);
-    return res.status(400).json({ error: 'No session ID provided' });
-  }
-
-  // Get the text from the session
-  const session = activeSessions.get(sessionId);
-  if (!session) {
-    console.error(`[${requestId}] Invalid or expired session ID: ${sessionId}`);
-    return res.status(404).json({ error: 'Invalid or expired session ID' });
-  }
-
-  const text = session.text;
-  console.log(`[${requestId}] ==========================================`);
-  console.log(`[${requestId}] Starting new summarization request (SSE) from session ${sessionId}`);
-  console.log(`[${requestId}] Content length: ${text.length} characters`);
-  console.log(`[${requestId}] Client IP: ${req.ip || 'unknown'}`);
-  console.log(`[${requestId}] User agent: ${req.headers['user-agent'] || 'unknown'}`);
-
-  // Set up SSE headers
-  try {
-    console.log(`[${requestId}] Setting up SSE headers`);
-    res.writeHead(200, {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      'Connection': 'keep-alive',
-      'X-Accel-Buffering': 'no' // Disable buffering for Nginx
-    });
-    console.log(`[${requestId}] SSE headers sent successfully`);
-  } catch (err) {
-    console.error(`[${requestId}] Error setting SSE headers:`, err);
-    return res.status(500).json({ error: 'Server error setting up connection' });
-  }
-  
-  // Helper function to send SSE events
-  const sendEvent = (event, data) => {
-    try {
-      const eventData = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
-      const result = res.write(eventData);
-      console.log(`[${requestId}] Sent '${event}' event (${eventData.length} bytes), buffer empty: ${result}`);
-      return result;
-    } catch (err) {
-      console.error(`[${requestId}] Error sending SSE event '${event}':`, err);
-      return false;
-    }
-  };
-  
-  // Setup heartbeat to keep connection alive
-  const heartbeatInterval = setInterval(() => {
-    try {
-      const result = sendEvent('heartbeat', { timestamp: Date.now() });
-      if (!result) {
-        console.warn(`[${requestId}] Heartbeat event write buffer is full, connection may be stalled`);
-      }
-    } catch (err) {
-      console.error(`[${requestId}] Error in heartbeat:`, err);
-    }
-  }, 15000); // Send heartbeat every 15 seconds
-  
-  // Function to clean up resources when finished
-  const cleanup = () => {
-    console.log(`[${requestId}] Cleaning up resources`);
-    clearInterval(heartbeatInterval);
-    // Clean up session after processing
-    activeSessions.delete(sessionId);
-    console.log(`[${requestId}] Removed session ${sessionId}`);
-  };
-  
-  // Handle client disconnection
-  req.on('close', () => {
-    console.log(`[${requestId}] Client disconnected, cleaning up resources`);
-    cleanup();
-  });
-
-  req.on('error', (err) => {
-    console.error(`[${requestId}] Request error:`, err);
-    cleanup();
-  });
-  
-  res.on('error', (err) => {
-    console.error(`[${requestId}] Response error:`, err);
-    cleanup();
-  });
-  
-  try {
-    const startTime = Date.now();
-    
-    // Send processing started message
-    console.log(`[${requestId}] Sending initial processing event`);
-    sendEvent('processing', { 
-      message: 'Processing started',
-      timestamp: Date.now(),
-      requestId,
-      sessionId
-    });
-    
-    // Handle very large documents with a warning
-    if (text.length > 100000) {
-      sendEvent('info', {
-        message: 'Processing a very large document. This may take several minutes.',
-        size: text.length
-      });
-    }
-    
-    // Determine processing strategy based on content size
-    if (text.length <= 10000) {
-      // For small content, process directly
-      console.log(`[${requestId}] Small content detected (${text.length} chars). Processing directly.`);
-      const result = await processChunk(text);
-      
-      const totalTime = Date.now() - startTime;
-      console.log(`[${requestId}] Completed small content summarization in ${totalTime}ms`);
-      
-      // Send final result
-      sendEvent('result', {
-        summary: result.summary,
-        model: result.model,
-        processingTime: `${totalTime}ms`
-      });
-      cleanup();
-      res.end();
-      return;
-    }
-    
-    // For larger content, use chunking
-    console.log(`Large content detected (${text.length} chars). Using chunk-based processing.`);
-    console.log('Chunking text...');
-    const chunkStartTime = Date.now();
-    const chunks = chunkText(text, MAX_CHUNK_SIZE);
-    console.log(`Chunking completed in ${Date.now() - chunkStartTime}ms. Split into ${chunks.length} chunks.`);
-
-    // Send chunking info to client
-    sendEvent('info', {
-      message: `Document split into ${chunks.length} chunks`,
-      chunkCount: chunks.length,
-      chunksProcessed: 0
-    });
-
-    // Process chunks with limited parallelism
-    console.log(`Processing ${chunks.length} chunks with parallelism of ${MAX_PARALLEL_CHUNKS}`);
-    const summaries = new Array(chunks.length).fill(null);
-    const processStartTime = Date.now();
-    
-    // Process chunks in batches to limit parallelism
-    for (let i = 0; i < chunks.length; i += MAX_PARALLEL_CHUNKS) {
-      const batch = [];
-      
-      // Send batch processing update
-      sendEvent('info', {
-        message: `Starting batch ${Math.floor(i/MAX_PARALLEL_CHUNKS) + 1} of ${Math.ceil(chunks.length/MAX_PARALLEL_CHUNKS)}`,
-        currentBatch: Math.floor(i/MAX_PARALLEL_CHUNKS) + 1,
-        totalBatches: Math.ceil(chunks.length/MAX_PARALLEL_CHUNKS)
-      });
-      
-      // Create batch of promises for parallel processing
-      for (let j = 0; j < MAX_PARALLEL_CHUNKS && i + j < chunks.length; j++) {
-        const chunkIndex = i + j;
-        batch.push(
-          processChunk(chunks[chunkIndex], chunkIndex)
-            .then(result => {
-              summaries[chunkIndex] = result.summary;
-              
-              // Send progress update to client
-              sendEvent('progress', {
-                chunkIndex: chunkIndex,
-                totalChunks: chunks.length,
-                progress: Math.round(((chunkIndex + 1) / chunks.length) * 100),
-                timestamp: Date.now()
-              });
-              
-              return result;
-            })
-            .catch(err => {
-              console.error(`Error processing chunk ${chunkIndex}:`, err);
-              
-              // Send chunk error to client but continue processing
-              sendEvent('warning', {
-                message: `Error processing chunk ${chunkIndex + 1}: ${err.message}`,
-                chunkIndex: chunkIndex,
-                error: err.message
-              });
-              
-              // Return empty summary to avoid breaking the process
-              return { summary: `[Error processing this section: ${err.message}]` };
-            })
-        );
-      }
-      
-      try {
-        // Wait for current batch to complete before starting next batch
-        await Promise.all(batch);
-      } catch (batchError) {
-        console.error('Error processing batch:', batchError);
-        sendEvent('warning', {
-          message: `Error in batch processing: ${batchError.message}`,
-          error: batchError.message
-        });
-        // Continue with next batch despite errors
-      }
-    }
-    
-    console.log(`Chunk processing completed in ${Date.now() - processStartTime}ms`);
-    
-    // If only one chunk was processed, return its summary
-    if (summaries.length === 1) {
-      const totalTime = Date.now() - startTime;
-      console.log(`Single chunk summary completed in ${totalTime}ms`);
-      
-      sendEvent('result', {
-        summary: summaries[0],
-        chunkCount: chunks.length,
-        processedChunks: 1,
-        model: 'claude-3-5-haiku-20241022',
-        processingTime: `${totalTime}ms`
-      });
-      cleanup();
-      res.end();
-      return;
-    }
-    
-    // Filter out any null summaries in case some chunks failed
-    const validSummaries = summaries.filter(s => s !== null);
-    if (validSummaries.length === 0) {
-      throw new Error('All chunks failed processing');
-    }
-    
-    // For multiple chunks, create a meta-summary
-    sendEvent('info', {
-      message: 'Creating final summary from all processed chunks...',
-      chunksProcessed: validSummaries.length,
-      totalChunks: chunks.length
-    });
-    
-    console.log(`Creating meta-summary from ${validSummaries.length} processed chunks`);
-    const metaSummaryStartTime = Date.now();
-    const metaSummary = await createMetaSummary(validSummaries, chunks.length);
-    console.log(`Meta-summary creation completed in ${Date.now() - metaSummaryStartTime}ms`);
-    
-    const totalTime = Date.now() - startTime;
-    console.log(`Complete summarization process finished in ${totalTime}ms`);
-    
-    // Send final result
-    sendEvent('result', {
-      summary: metaSummary.summary,
-      chunkCount: chunks.length,
-      processedChunks: validSummaries.length,
-      model: metaSummary.model,
-      processingTime: `${totalTime}ms`
-    });
-    cleanup();
-    res.end();
-  } catch (error) {
-    console.error(`[${requestId}] Error during summarization:`, error);
-    
-    // Handle rate limits and overloads specially
-    if (error.status === 429) {
-      const retryAfter = error.headers?.get('retry-after') || 60;
-      console.error(`[${requestId}] Rate limit exceeded. Retry after: ${retryAfter}s`);
-      sendEvent('error', { 
-        error: `Rate limit exceeded. Please try again later.`, 
-        retryAfter,
-        errorCode: 429,
-        requestId
-      });
-    } else if (error.status === 503) {
-      console.error(`[${requestId}] AI service overloaded`);
-      sendEvent('error', { 
-        error: `The AI service is currently overloaded. Please try again later.`, 
-        isOverloaded: true,
-        errorCode: 503,
-        requestId
-      });
-    } else if (error.code === 'ETIMEDOUT' || error.code === 'ESOCKETTIMEDOUT' || error.code === 'ECONNABORTED') {
-      console.error(`[${requestId}] Network timeout occurred:`, error);
-      sendEvent('error', { 
-        error: `The request timed out. This often happens with very large documents. Try splitting your document into smaller parts.`,
-        isTimeout: true,
-        errorCode: 'TIMEOUT',
-        requestId
-      });
-    } else {
-      console.error(`[${requestId}] Unexpected error:`, error);
-      sendEvent('error', { 
-        error: `Summarization failed: ${error.message}`,
-        errorDetails: error.stack,
-        requestId
-      });
-    }
-    
-    cleanup();
-    try {
-      res.end();
-      console.log(`[${requestId}] Connection closed due to error`);
-    } catch (err) {
-      console.error(`[${requestId}] Error closing connection:`, err);
-    }
-  }
-});
-
-// Original SSE endpoint for backward compatibility
-app.get('/api/summarize', async (req, res) => {
-  // Add request ID for tracking in logs
-  const requestId = Date.now().toString(36) + Math.random().toString(36).substring(2, 7);
-  console.log(`[${requestId}] New SSE connection request received (legacy endpoint)`);
-
-  const { userText } = req.query;
-  
-  if (!userText) {
-    console.error(`[${requestId}] No text provided in request`);
-    return res.status(400).json({ error: 'No text provided for summarization' });
-  }
-
-  try {
-    // Log the request details including query parameter length
-    console.log(`[${requestId}] Query param length: ${req.url.length} characters`);
-    console.log(`[${requestId}] userText param length: ${userText.length} characters`);
-    
-    const text = decodeURIComponent(userText);
-    console.log(`[${requestId}] ==========================================`);
-    console.log(`[${requestId}] Starting new summarization request (legacy SSE endpoint)`);
-    console.log(`[${requestId}] Content length after decoding: ${text.length} characters`);
-    console.log(`[${requestId}] Client IP: ${req.ip || 'unknown'}`);
-    console.log(`[${requestId}] User agent: ${req.headers['user-agent'] || 'unknown'}`);
-
-    // Create a temporary session for this request
-    const sessionId = Date.now().toString(36) + Math.random().toString(36).substring(2, 10);
-    activeSessions.set(sessionId, {
-      text,
-      createdAt: Date.now()
-    });
-    
-    // Redirect to the session-based endpoint 
-    return res.redirect(307, `/api/summarize-stream?sessionId=${sessionId}`);
-  } catch (error) {
-    console.error(`[${requestId}] Error in legacy endpoint:`, error);
-    return res.status(500).json({ 
-      error: `Error processing request: ${error.message}`,
-      message: 'Please use the /api/create-session endpoint for large documents'
-    });
-  }
-});
 
 // Start the server
 app.listen(PORT, () => {

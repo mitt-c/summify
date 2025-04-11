@@ -28,6 +28,9 @@ export default function Home() {
     progress: number;
     currentChunk: number;
     totalChunks: number;
+    message?: string;
+    stage?: 'splitting' | 'processing' | 'finalizing';
+    overallProgress?: number; // 0-100 overall progress including all stages
   } | null>(null);
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -163,14 +166,44 @@ export default function Home() {
         const data = JSON.parse(event.data);
         console.log('Info:', data);
         
-        // Update placeholder message with info
-        setMessages(prev => 
-          prev.map(msg => 
-            msg.id === placeholderId 
-              ? { ...msg, content: `${msg.content}\n\n${data.message}` }
-              : msg
-          )
-        );
+        // Use simpler progress tracking with fewer UI updates
+        // Only update UI for major state changes
+        if (data.message?.includes('Document split into')) {
+          setProcessingProgress(prev => ({
+            status: 'processing',
+            progress: 10,
+            currentChunk: 0,
+            totalChunks: 1,
+            stage: 'splitting',
+            overallProgress: 10,
+            message: data.message
+          }));
+        } 
+        else if (data.message?.includes('Creating final summary')) {
+          setProcessingProgress(prev => ({
+            status: 'processing',
+            progress: 80,
+            currentChunk: 1,
+            totalChunks: 1,
+            stage: 'finalizing',
+            overallProgress: 80,
+            message: 'Creating final summary...'
+          }));
+        }
+        // Only other essential updates, skip minor ones
+        else if (data.message && data.message.includes('batches')) {
+          setProcessingProgress(prev => ({
+            ...prev || {
+              status: 'processing',
+              progress: 30,
+              currentChunk: 0,
+              totalChunks: 1,
+            },
+            stage: 'processing',
+            overallProgress: 30,
+            message: data.message
+          }));
+        }
       });
       
       // Handle warning messages
@@ -178,37 +211,45 @@ export default function Home() {
         const data = JSON.parse(event.data);
         console.warn('Warning:', data);
         
-        // We don't set error state for warnings, just log them
-        // Optionally update the placeholder to show warnings
-        setMessages(prev => 
-          prev.map(msg => 
-            msg.id === placeholderId 
-              ? { ...msg, content: `${msg.content}\n\n⚠️ Warning: ${data.message}` }
-              : msg
-          )
-        );
+        // Add a warning banner instead of modifying the content
+        setError(`Warning: ${data.message}`);
       });
       
+      // Handle progress updates - with throttling
+      let lastProgressUpdate = 0;
       eventSource.addEventListener('progress', (event: MessageEvent) => {
         const data = JSON.parse(event.data);
+        const now = Date.now();
+        
+        // Throttle progress updates to at most 1 per second to reduce rendering overhead
+        if (now - lastProgressUpdate < 1000) {
+          return;
+        }
+        lastProgressUpdate = now;
+        
         // Clear the connection timeout since we received an event
         clearTimeout(connectionTimeout);
         
-        setProcessingProgress({
-          status: 'processing',
-          progress: data.progress,
-          currentChunk: data.chunkIndex + 1,
-          totalChunks: data.totalChunks
-        });
+        // Simplified progress calculation with fewer steps
+        let overallProgress = 10; // Start at 10% for document splitting
         
-        // Update placeholder message to show progress
-        setMessages(prev => 
-          prev.map(msg => 
-            msg.id === placeholderId 
-              ? { ...msg, content: `Processing... ${data.progress}% complete` }
-              : msg
-          )
-        );
+        if (data.progress) {
+          // Map chunk progress to 10%-80% range
+          overallProgress = 10 + (data.progress / 100 * 70);
+        }
+        
+        setProcessingProgress(prev => ({
+          ...prev || {
+            status: 'processing',
+            totalChunks: 1
+          },
+          stage: 'processing',
+          progress: data.progress || 0,
+          currentChunk: data.chunkIndex + 1 || 1,
+          totalChunks: data.totalChunks || 1,
+          overallProgress: Math.round(overallProgress),
+          message: data.message || `Processing content...`
+        }));
       });
       
       eventSource.addEventListener('result', (event: MessageEvent) => {
@@ -384,37 +425,48 @@ export default function Home() {
 
             {loading && (
               <div className="mb-6 flex justify-start">
-                <div className="glass-card rounded-2xl px-6 py-4 max-w-md">
-                  <div className="flex items-center">
-                    <div className="loader-dots flex space-x-2">
-                      <div className="w-2 h-2 rounded-full bg-indigo-500 animate-pulse"></div>
-                      <div className="w-2 h-2 rounded-full bg-indigo-500 animate-pulse" style={{ animationDelay: '0.2s' }}></div>
-                      <div className="w-2 h-2 rounded-full bg-indigo-500 animate-pulse" style={{ animationDelay: '0.4s' }}></div>
+                <div className="glass-card rounded-2xl px-6 py-4 max-w-md w-full">
+                  {/* Modern header with pulse animation */}
+                  <div className="flex items-center mb-3">
+                    <div className="relative mr-3">
+                      <div className="w-3 h-3 rounded-full bg-indigo-500"></div>
+                      <div className="absolute inset-0 w-3 h-3 rounded-full bg-indigo-500 animate-ping opacity-75"></div>
                     </div>
-                    <span className="ml-3 text-sm text-gray-300 font-medium">Summarizing your content...</span>
+                    <span className="text-sm font-medium text-indigo-400">
+                      AI Processing
+                    </span>
+                    {processingProgress?.overallProgress ? (
+                      <span className="ml-auto text-sm font-medium text-gray-300">
+                        {processingProgress.overallProgress}%
+                      </span>
+                    ) : null}
                   </div>
-                  
-                  {processingProgress && (
-                    <div className="mt-3">
-                      <div className="w-full bg-gray-700 rounded-full h-1.5">
-                        <div 
-                          className="bg-indigo-500 h-1.5 rounded-full transition-all duration-300 ease-in-out" 
-                          style={{ width: `${processingProgress.progress}%` }}
-                        ></div>
+
+                  {/* Progress indicator - simplified version */}
+                  {processingProgress?.overallProgress ? (
+                    <div className="w-full space-y-2 my-4">
+                      <div className="flex justify-between text-xs text-gray-500">
+                        <span>Processing</span>
+                        <span>{processingProgress.overallProgress}%</span>
                       </div>
-                      <p className="text-xs text-gray-400 mt-2">
-                        Processing chunk {processingProgress.currentChunk} of {processingProgress.totalChunks} 
-                        ({processingProgress.progress}% complete)
-                      </p>
+                      
+                      {/* Simpler progress bar with minimal update */}
+                      <div className="h-1 w-full bg-gray-200 rounded-full overflow-hidden">
+                        <div 
+                          className="h-full bg-indigo-500 transition-all duration-300 ease-in-out"
+                          style={{ width: `${processingProgress?.overallProgress || 0}%` }}
+                        />
+                      </div>
+                      
+                      {/* Simplified status message */}
+                      <div className="text-xs text-gray-500 text-center animate-pulse">
+                        {processingProgress?.message || "Processing your content..."}
+                      </div>
                     </div>
-                  )}
-                  
-                  {!processingProgress && (
-                    <p className="text-xs text-gray-400 mt-2">
-                      {text.length > 100000 
-                        ? "This may take a minute for larger content..."
-                        : "Generating a concise, structured summary..."}
-                    </p>
+                  ) : (
+                    <div className="w-full my-4 flex justify-center">
+                      <div className="animate-spin rounded-full h-6 w-6 border-t-2 border-indigo-500"></div>
+                    </div>
                   )}
                 </div>
               </div>
