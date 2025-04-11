@@ -82,8 +82,11 @@ export default function Home() {
     resetTextarea();
     
     try {
-      // Send the request to the API
-      const response = await fetch('/api/summarize', {
+      // Get the backend URL from environment variable
+      const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:3001';
+      
+      // Send the request directly to the backend API
+      const response = await fetch(`${backendUrl}/api/summarize`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
