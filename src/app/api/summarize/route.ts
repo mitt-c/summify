@@ -22,7 +22,8 @@ You MUST follow these output format requirements:
 3. Include a "## Implementation Path" section with specific steps needed to make it work successfully
 4. Add a "## Time-Saving Patterns" section that highlights reusable strategies applicable across projects
 5. Include a "## Risk Mitigation" section with common errors, debugging tips, architectural anti-patterns, and security considerations
-6. End with a "## Business Impact" section that outlines efficiency gains, cost savings, or other business value
+6. Add a "## Problem Areas" section that identifies technical debt, unclear explanations, missing documentation, or problematic implementations
+7. End with a "## Business Impact" section that outlines efficiency gains, cost savings, or other business value
 
 Keep language clear and concise. Aim to save developer time through effective knowledge transfer.
 
@@ -54,6 +55,12 @@ EXAMPLE CODE SUMMARY:
 - Cache poisoning: Set strict TTL and validate against source-of-truth on write
 - Failed refresh: Implement auth.gracefulDegradation() for outage handling
 - DoS vulnerability: Enable auth.enableRateLimiting() in production
+
+## Problem Areas
+- The refresh token logic lacks atomic operations, creating race conditions under high load
+- Error messages in validateToken() are cryptic and unhelpful for debugging
+- The caching layer has no test coverage, making refactoring risky
+- Role management is tightly coupled to the authentication service, violating separation of concerns
 
 ## Business Impact
 - Reduces authentication overhead from ~120ms to ~15ms per request
@@ -88,6 +95,12 @@ EXAMPLE DOCUMENTATION SUMMARY:
 - Wrong IAM permissions: Apply least-privilege templates from security-validated repository
 - Cold starts in VPC: Place Lambdas in private subnets with pre-allocated ENIs
 
+## Problem Areas
+- Documentation fails to address cross-account layer sharing limitations
+- Cost implications of provisioned concurrency are understated and lack real-world examples
+- The section on VPC connectivity is outdated and doesn't reflect 2023 AWS improvements
+- No mention of Lambda function URL security considerations or custom domain setup
+
 ## Business Impact
 - Saves 1-2 days of debugging time per development cycle
 - Reduces average API latency by 65% on first request
@@ -105,11 +118,15 @@ For CODE content:
 - Focus on implementation patterns, reusable components, and error-handling approaches that save time
 - Flag complex logic blocks that would benefit from additional documentation
 - Identify optimization opportunities in the implementation
+- Scrutinize for potential bugs, performance bottlenecks, security issues, or maintainability problems
+- Look for code smells, tight coupling, or overly complex implementations that could be refactored
 
 For DOCS content:
 - Focus on workflows, configuration shortcuts, and best practices that prevent common pitfalls
 - Identify any missing information that would help developers implement more effectively
 - Highlight areas where documentation could be expanded for clarity
+- Identify outdated information, contradictions, or unclear explanations
+- Flag sections where examples are missing, incomplete, or don't follow best practices
 
 Your goal is to create a summary that would save a developer hours of reading time while preserving all essential information for successful implementation.`;
 
@@ -127,6 +144,7 @@ Guidelines:
 5. Emphasize scalable approaches that work across team boundaries
 6. Flag any efficiency bottlenecks or areas for optimization
 7. Structure information to minimize cognitive load for new developers
+8. Consolidate problem areas to highlight systemic issues or recurring challenges
 
 Examine the content and determine whether it's primarily CODE or DOCUMENTATION:
 - For CODE: Emphasize architectural patterns that promote maintainability and team collaboration
@@ -137,6 +155,7 @@ Prioritize insights that:
 2. Reduce onboarding time for new developers
 3. Prevent production incidents
 4. Optimize cloud resource usage
+5. Address technical debt or recurring pain points
 
 Below are summaries of different sections. Create a cohesive summary that maximizes knowledge transfer efficiency.
 
@@ -167,6 +186,12 @@ Here's an example of a good meta-summary:
 - Network partition: Configure fallback to database with automatic reconnection
 - Cache stampede: Apply exponential backoff and jitter to refresh attempts
 - Data leakage: Enable encryption-at-rest and sanitize sensitive fields
+
+## Problem Areas
+- The Redis connection pooling is not optimally configured, leading to connection exhaustion
+- Serialization/deserialization overhead negates some performance benefits for small objects
+- Error handling in the invalidation consumers lacks dead-letter-queue integration
+- Documentation for custom cache key generation is missing, leading to frequent key collisions
 
 ## Business Impact
 - Reduces infrastructure costs by approximately $12,000/year through improved efficiency
