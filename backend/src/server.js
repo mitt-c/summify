@@ -214,7 +214,7 @@ function chunkText(text, maxChunkSize = MAX_CHUNK_SIZE) {
 async function processChunk(text, chunkIndex) {
   const maxRetries = 3;
   let retryCount = 0;
-  const model = 'claude-3-5-sonnet-20240620';
+  const model = 'claude-3-5-haiku-20241022';
   
   // Log start of chunk processing with timing
   const startTime = Date.now();
