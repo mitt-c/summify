@@ -21,6 +21,7 @@ export default function Home() {
   ]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [textTruncated, setTextTruncated] = useState(false);
   const [modelInfoMap, setModelInfoMap] = useState<Record<string, string>>({});
   const [processingProgress, setProcessingProgress] = useState<{
     status: string;
@@ -83,6 +84,7 @@ export default function Home() {
     setText('');
     setLoading(true);
     setError('');
+    setTextTruncated(false);
     setProcessingProgress(null);
     
     // Reset textarea height after sending
@@ -103,18 +105,95 @@ export default function Home() {
 
     try {
       // Use Server-Sent Events for streaming
-      const eventSource = new EventSource(`${backendUrl}/api/summarize?userText=${encodeURIComponent(userMessage.content)}`);
+      console.log(`Attempting to connect to ${backendUrl}/api/summarize with ${userMessage.content.length} characters of text`);
+      
+      // First, make a POST request to initiate the session
+      console.log('Making initial POST request to create session ID');
+      const sessionResponse = await fetch(`${backendUrl}/api/create-session`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ text: userMessage.content }),
+      });
+      
+      if (!sessionResponse.ok) {
+        throw new Error(`Failed to create session: ${sessionResponse.status} ${sessionResponse.statusText}`);
+      }
+      
+      const sessionData = await sessionResponse.json();
+      console.log('Session created with ID:', sessionData.sessionId);
+      
+      // Then connect to SSE endpoint with just the session ID
+      const eventSource = new EventSource(`${backendUrl}/api/summarize-stream?sessionId=${sessionData.sessionId}`);
       let finalData: any = {};
       let summary = '';
+      
+      console.log('EventSource instance created with session ID, adding event listeners...');
+      
+      // Set a timeout to detect initial connection issues
+      const connectionTimeout = setTimeout(() => {
+        if (!summary && !error) {
+          console.error('Connection timeout reached after 10 seconds with no events received');
+          setError("Unable to establish connection to the server. Please try again.");
+          eventSource.close();
+        }
+      }, 10000); // 10 seconds timeout
+      
+      // Connection open event
+      eventSource.onopen = () => {
+        console.log('EventSource connection opened successfully');
+      };
       
       // Handle different event types
       eventSource.addEventListener('processing', (event: MessageEvent) => {
         const data = JSON.parse(event.data);
-        console.log('Processing started:', data);
+        console.log('Processing event received:', data);
+        // Clear the connection timeout since we received an event
+        clearTimeout(connectionTimeout);
+      });
+      
+      // Handle heartbeat to keep connection alive
+      eventSource.addEventListener('heartbeat', (event: MessageEvent) => {
+        console.log('Heartbeat received at', new Date().toISOString());
+      });
+      
+      // Handle info messages
+      eventSource.addEventListener('info', (event: MessageEvent) => {
+        const data = JSON.parse(event.data);
+        console.log('Info:', data);
+        
+        // Update placeholder message with info
+        setMessages(prev => 
+          prev.map(msg => 
+            msg.id === placeholderId 
+              ? { ...msg, content: `${msg.content}\n\n${data.message}` }
+              : msg
+          )
+        );
+      });
+      
+      // Handle warning messages
+      eventSource.addEventListener('warning', (event: MessageEvent) => {
+        const data = JSON.parse(event.data);
+        console.warn('Warning:', data);
+        
+        // We don't set error state for warnings, just log them
+        // Optionally update the placeholder to show warnings
+        setMessages(prev => 
+          prev.map(msg => 
+            msg.id === placeholderId 
+              ? { ...msg, content: `${msg.content}\n\n⚠️ Warning: ${data.message}` }
+              : msg
+          )
+        );
       });
       
       eventSource.addEventListener('progress', (event: MessageEvent) => {
         const data = JSON.parse(event.data);
+        // Clear the connection timeout since we received an event
+        clearTimeout(connectionTimeout);
+        
         setProcessingProgress({
           status: 'processing',
           progress: data.progress,
@@ -134,6 +213,9 @@ export default function Home() {
       
       eventSource.addEventListener('result', (event: MessageEvent) => {
         const data = JSON.parse(event.data);
+        // Clear the connection timeout since we received the final result
+        clearTimeout(connectionTimeout);
+        
         finalData = data;
         summary = data.summary;
         
@@ -178,6 +260,9 @@ export default function Home() {
       });
       
       eventSource.addEventListener('error', (event: MessageEvent) => {
+        // Clear the connection timeout since we received an event (even if it's an error)
+        clearTimeout(connectionTimeout);
+        
         console.error('SSE Error:', event);
         
         // Try to parse error data if available
@@ -186,6 +271,11 @@ export default function Home() {
           if (event.data) {
             const errorData = JSON.parse(event.data);
             errorMessage = errorData.error || errorMessage;
+            
+            // Add more context for timeout errors
+            if (errorData.isTimeout) {
+              errorMessage += ' Try splitting your document into smaller sections.';
+            }
           }
         } catch (e) {
           // Use default error message if parsing fails
@@ -198,12 +288,28 @@ export default function Home() {
       
       // Handle connection errors
       eventSource.onerror = (err) => {
-        console.error('EventSource failed:', err);
-        setError('Connection to the server failed');
+        // Clear the connection timeout since we received an event (even if it's an error)
+        clearTimeout(connectionTimeout);
+        
+        console.error('EventSource connection error:', err);
+        console.error('EventSource readyState:', eventSource.readyState);
+        // 0 = CONNECTING, 1 = OPEN, 2 = CLOSED
+        
+        let errorMsg = 'Connection to the server failed.';
+        if (eventSource.readyState === 2) {
+          errorMsg += ' The connection was closed unexpectedly.';
+        } else if (eventSource.readyState === 0) {
+          errorMsg += ' Unable to establish connection to the server.';
+        }
+        
+        errorMsg += ' This may happen with very large documents. Try breaking your content into smaller chunks.';
+        
+        setError(errorMsg);
         setMessages(prev => prev.filter(msg => msg.id !== placeholderId));
         eventSource.close();
       };
     } catch (err) {
+      console.error('Exception in EventSource setup:', err);
       setError(err instanceof Error ? err.message : 'An error occurred');
       // Remove placeholder message on error
       setMessages(prev => prev.filter(msg => !msg.id.startsWith('placeholder-')));
@@ -305,7 +411,7 @@ export default function Home() {
                   
                   {!processingProgress && (
                     <p className="text-xs text-gray-400 mt-2">
-                      {text.length > 10000 
+                      {text.length > 100000 
                         ? "This may take a minute for larger content..."
                         : "Generating a concise, structured summary..."}
                     </p>
@@ -335,7 +441,17 @@ export default function Home() {
                 <textarea
                   ref={inputRef}
                   value={text}
-                  onChange={(e) => setText(e.target.value)}
+                  onChange={(e) => {
+                    const newText = e.target.value;
+                    // Apply hard limit of 100,000 characters
+                    if (newText.length > 100000) {
+                      setText(newText.substring(0, 100000));
+                      setTextTruncated(true);
+                    } else {
+                      setText(newText);
+                      setTextTruncated(false);
+                    }
+                  }}
                   onKeyDown={handleKeyDown}
                   className="w-full p-4 pr-14 chat-input text-gray-200 focus:outline-none resize-none overflow-hidden"
                   placeholder="Enter code, documentation, or any technical content to summarize..."
@@ -361,9 +477,14 @@ export default function Home() {
                   )}
                 </button>
               </div>
-              {text.length > 75000 && (
+              {text.length > 75000 && !textTruncated && (
                 <div className="text-amber-400 text-xs mt-1 px-2">
                   Large text detected ({text.length.toLocaleString()} characters). Consider breaking into smaller parts for better results.
+                </div>
+              )}
+              {textTruncated && (
+                <div className="text-red-400 text-xs mt-1 px-2 font-medium">
+                  Text has been truncated to 100,000 characters. The remaining text was removed.
                 </div>
               )}
             </form>
