@@ -133,7 +133,11 @@ export function chunkTextForClient(text: string): string[] {
  * Process a single chunk of text through the summarize API
  */
 export async function processSingleChunk(chunk: string) {
-  const response = await fetch('/api/summarize', {
+  // Get the backend URL from environment variable
+  const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:3001';
+  
+  // Send the request to the backend API
+  const response = await fetch(`${backendUrl}/api/summarize`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
