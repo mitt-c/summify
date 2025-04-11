@@ -526,7 +526,7 @@ async function processChunk(text, chunkIndex) {
   const maxRetries = 3;
   let retryCount = 0;
   // Use Claude 3.5 Haiku for speed
-  const model = 'claude-3-5-haiku-latest';
+  const model = 'claude-3-5-haiku-20241022';
   
   // Log start of chunk processing with timing
   const startTime = Date.now();
