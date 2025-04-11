@@ -22,7 +22,6 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [textTruncated, setTextTruncated] = useState(false);
-  const [modelInfoMap, setModelInfoMap] = useState<Record<string, string>>({});
   const [processingProgress, setProcessingProgress] = useState<{
     status: string;
     progress: number;
@@ -273,27 +272,6 @@ export default function Home() {
           msg.id === placeholderId ? assistantMessage : msg
         ));
         
-        // Build model info string
-        let infoText = `Model: ${finalData.model || 'Unknown'}`;
-        
-        // Add content type if available
-        if (finalData.contentType) {
-          infoText += ` | Content type: ${finalData.contentType}`;
-        }
-        
-        if (finalData.chunkCount) {
-          infoText += ` | Text was split into ${finalData.chunkCount} chunks`;
-          if (finalData.processedChunks && finalData.processedChunks < finalData.chunkCount) {
-            infoText += ` (processed ${finalData.processedChunks} chunks)`;
-          }
-        }
-        
-        // Add processing time if available
-        if (finalData.processingTime) {
-          infoText += ` | Processing time: ${finalData.processingTime}`;
-        }
-        
-        setModelInfoMap(prev => ({ ...prev, [assistantMessage.id]: infoText }));
         setProcessingProgress(null);
         
         // Close the connection once we have the result
@@ -411,12 +389,6 @@ export default function Home() {
                   ) : (
                     <div className="markdown-content overflow-auto max-h-[70vh]">
                       <ReactMarkdown>{message.content}</ReactMarkdown>
-                    </div>
-                  )}
-                  
-                  {message.type === 'assistant' && modelInfoMap[message.id] && (
-                    <div className="mt-2 pt-2 border-t border-gray-700 text-xs text-gray-400">
-                      {modelInfoMap[message.id]}
                     </div>
                   )}
                 </div>

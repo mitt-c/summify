@@ -459,31 +459,45 @@ A complete authentication system with both client and server components providin
 // Helper functions
 // Function to get optimal chunk size based on text length
 function getOptimalChunkSize(textLength) {
-  if (textLength < 10000) {
-    return textLength; // Don't chunk very small documents
-  } else if (textLength < 30000) {
-    // For medium docs, use 2-3 evenly sized chunks
+  // Claude 3.5 Haiku can handle ~50K tokens (approximately 200K characters)
+  const MAX_SAFE_CHARS = 180000; // Stay under the model's limit
+  
+  // Small documents should be processed as a single chunk
+  // This avoids unnecessary multi-chunk processing for small docs
+  if (textLength <= MAX_SAFE_CHARS) {
+    console.log(`Document fits in a single chunk (${textLength} chars)`);
+    return textLength; // Process as a single chunk
+  } else if (textLength <= MAX_SAFE_CHARS * 2) {
+    // For texts up to 2x the limit, use 2 evenly sized chunks
+    console.log(`Splitting document into 2 chunks (${textLength} chars)`);
     return Math.ceil(textLength / 2);
-  } else if (textLength < 50000) {
-    return Math.ceil(textLength / 3);
-  } else if (textLength < 100000) {
-    return Math.ceil(textLength / 4);
   } else {
-    // For very large docs, use larger chunks but don't exceed max
-    return Math.min(MAX_CHUNK_SIZE, Math.ceil(textLength / 5));
+    // For large documents, use the maximum safe chunk size
+    console.log(`Large document, using maximum chunk size (${textLength} chars)`);
+    return MAX_SAFE_CHARS;
   }
 }
 
 /**
  * Breaks text into chunks of approximately the specified size
  * Tries to break at meaningful boundaries (paragraphs, sentences, or code blocks)
+ * OPTIMIZATION: Prioritizes having a single chunk or avoiding meta-summary (<=4 chunks)
  */
 function chunkText(text, maxChunkSize = MAX_CHUNK_SIZE) {
-  // If text is already small enough, return it as is
+  // If text is already small enough, return it as a single chunk
   if (text.length <= maxChunkSize) {
+    console.log(`Text fits in a single chunk (${text.length} chars)`);
     return [text];
   }
   
+  // For small to medium docs that would produce just 2-3 chunks,
+  // try to fit them in a single chunk if possible to avoid meta-summary
+  if (text.length <= 50000) {
+    console.log(`Small document (${text.length} chars) - processing as single chunk to avoid meta-summary`);
+    return [text]; // Force as single chunk for small docs
+  }
+  
+  // Regular chunking logic for larger documents
   // Calculate optimal chunk size based on text length
   const optimalChunkSize = getOptimalChunkSize(text.length);
   const effectiveChunkSize = Math.min(maxChunkSize, optimalChunkSize);
@@ -588,7 +602,33 @@ function chunkText(text, maxChunkSize = MAX_CHUNK_SIZE) {
     currentIndex = endIndex;
   }
 
-  return chunks;
+  // OPTIMIZATION: Merge very small chunks with the previous chunk
+  // This prevents wasted API calls on tiny chunks
+  const MIN_CHUNK_SIZE = 3000; // Minimum chunk size to process independently
+  const mergedChunks = [];
+  
+  for (let i = 0; i < chunks.length; i++) {
+    const currentChunk = chunks[i];
+    
+    // If this is a very small chunk and not the first chunk, merge with previous
+    if (currentChunk.length < MIN_CHUNK_SIZE && i > 0) {
+      // Check if merging would exceed max chunk size
+      const previousChunk = mergedChunks[mergedChunks.length - 1];
+      if (previousChunk.length + currentChunk.length <= maxChunkSize) {
+        // Merge with previous chunk
+        mergedChunks[mergedChunks.length - 1] = previousChunk + '\n\n' + currentChunk;
+        console.log(`Merged small chunk (${currentChunk.length} chars) with previous chunk`);
+      } else {
+        // Can't merge, keep as separate chunk
+        mergedChunks.push(currentChunk);
+      }
+    } else {
+      // Normal sized chunk or first chunk
+      mergedChunks.push(currentChunk);
+    }
+  }
+
+  return mergedChunks;
 }
 
 // Enhanced chunk processing with worker pool and rate limiting
@@ -598,8 +638,12 @@ async function processChunkWithWorker(text, chunkIndex) {
     // Wait for rate limiting with minimal logging
     await rateLimiter.waitForAvailableSlot();
     
-    // Execute the actual processing
+    // Execute the actual processing and track API duration
     const result = await processChunk(text, chunkIndex);
+    
+    // Log API call duration for this chunk
+    console.log(`Chunk ${chunkIndex !== undefined ? chunkIndex + 1 : 'single'} API call completed in ${result.apiCallDuration}ms`);
+    
     return result;
   };
   
@@ -617,12 +661,16 @@ async function processChunk(text, chunkIndex) {
   // Use Claude 3.5 Haiku for speed
   const model = 'claude-3-5-haiku-20241022';
   
+  // Start timing the API call
+  const apiStartTime = Date.now();
+  console.log(`[API Call Start] Chunk ${chunkIndex !== undefined ? chunkIndex + 1 : 'single'} - ${text.length} chars`);
+  
   while (retryCount < maxRetries) {
     try {
       const response = await anthropic.messages.create({
         model,
-        max_tokens: 1500,
-        temperature: 0.05,
+        max_tokens: 3000, 
+        temperature: 0.1,
         system: SYSTEM_PROMPT,
         messages: [
           {
@@ -632,12 +680,19 @@ async function processChunk(text, chunkIndex) {
         ]
       });
       
+      // Calculate API call duration
+      const apiCallDuration = Date.now() - apiStartTime;
+      console.log(`[API Call Complete] Chunk ${chunkIndex !== undefined ? chunkIndex + 1 : 'single'} - ${apiCallDuration}ms`);
+      
       return {
         summary: response.content[0].text,
-        model
+        model,
+        apiCallDuration
       };
     } catch (error) {
       retryCount++;
+      
+      console.error(`Error processing chunk ${chunkIndex !== undefined ? chunkIndex + 1 : 'single'}: ${error.message}`);
       
       if (retryCount >= maxRetries) {
         console.error(`Chunk ${chunkIndex !== undefined ? chunkIndex + 1 : 'single'}: All ${maxRetries} retry attempts failed`);
@@ -645,6 +700,7 @@ async function processChunk(text, chunkIndex) {
       }
       
       const waitTime = 2 ** retryCount * 1000; // Exponential backoff
+      console.log(`Waiting ${waitTime}ms before retry ${retryCount} for chunk ${chunkIndex !== undefined ? chunkIndex + 1 : 'single'}`);
       await new Promise(resolve => setTimeout(resolve, waitTime));
     }
   }
@@ -1048,7 +1104,8 @@ app.get('/api/summarize-stream', async (req, res) => {
     startTime: Date.now(),
     timeCheckpoints: {
       start: Date.now(),
-      end: 0
+      end: 0,
+      chunking: 0
     }
   };
 
@@ -1137,9 +1194,7 @@ app.get('/api/summarize-stream', async (req, res) => {
       
       // Send final result - ESSENTIAL
       sendEvent('result', {
-        summary: result.summary,
-        model: result.model,
-        processingTime: `${totalTime}ms`
+        summary: result.summary
       });
       cleanup();
       res.end();
@@ -1151,13 +1206,17 @@ app.get('/api/summarize-stream', async (req, res) => {
     
     const chunkStartTime = Date.now();
     const chunks = chunkText(text, MAX_CHUNK_SIZE);
-    console.log(`[${requestId}] Chunking completed. Split into ${chunks.length} chunks.`);
-
-    // Single notification about chunking - ESSENTIAL
+    perf.timeCheckpoints.chunking = Date.now();
+    const chunkingTime = perf.timeCheckpoints.chunking - chunkStartTime;
+    
+    console.log(`[${requestId}] Chunking completed in ${chunkingTime}ms. Split into ${chunks.length} chunks.`);
+    console.log(`[${requestId}] Chunk sizes: ${chunks.map(c => c.length).join(', ')} characters`);
+    
     sendEvent('info', {
-      message: `Document split into ${chunks.length} chunks. Processing started...`
+      message: `Processing document with ${chunks.length} ${chunks.length === 1 ? 'chunk' : 'chunks'}...`,
+      chunkSizes: chunks.map(c => c.length)
     });
-
+    
     // Determine optimal parallelism strategy
     let optimalParallelism = MAX_PARALLEL_CHUNKS;
     
@@ -1180,6 +1239,7 @@ app.get('/api/summarize-stream', async (req, res) => {
     const summaries = new Array(chunks.length).fill(null);
     let completedChunks = 0;
     let failedChunks = 0;
+    let totalApiDuration = 0;
     
     // Periodic progress update variables
     let lastProgressUpdate = Date.now();
@@ -1187,29 +1247,40 @@ app.get('/api/summarize-stream', async (req, res) => {
     
     // Choose processing strategy based on optimal parallelism
     if (optimalParallelism === 1) {
-      // Process chunks sequentially to avoid overhead
-      for (let i = 0; i < chunks.length; i++) {
-        try {
-          // Process chunk sequentially
-          const result = await processChunkWithWorker(chunks[i], i);
-          
-          // Store summary
-          summaries[i] = result.summary;
-          completedChunks++;
-          
-          // Only send occasional progress updates to reduce overhead
-          const now = Date.now();
-          if (now - lastProgressUpdate > PROGRESS_UPDATE_INTERVAL) {
-            lastProgressUpdate = now;
-            sendEvent('progress', {
-              progress: Math.round(((i + 1) / chunks.length) * 100)
-            });
-          }
-        } catch (err) {
-          console.error(`[${requestId}] Error processing chunk ${i}:`, err);
-          failedChunks++;
-          summaries[i] = `[Error processing this section: ${err.message}]`;
-        }
+      // Simple case: just one chunk
+      try {
+        console.log(`[${requestId}] Processing single chunk of ${chunks[0].length} characters`);
+        const result = await processChunkWithWorker(chunks[0], 0);
+        summaries[0] = result.summary;
+        completedChunks = 1;
+        totalApiDuration += result.apiCallDuration || 0;
+        console.log(`[${requestId}] Single chunk processed in ${result.apiCallDuration}ms`);
+      } catch (err) {
+        console.error(`[${requestId}] Error processing single chunk:`, err);
+        failedChunks = 1;
+        summaries[0] = `[Error processing content: ${err.message}]`;
+      }
+    } else if (chunks.length <= optimalParallelism) {
+      // Process all chunks in parallel if there are few enough
+      console.log(`[${requestId}] Processing ${chunks.length} chunks in parallel`);
+      
+      try {
+        const results = await Promise.all(
+          chunks.map((chunk, idx) => processChunkWithWorker(chunk, idx))
+        );
+        
+        results.forEach((result, idx) => {
+          summaries[idx] = result.summary;
+          totalApiDuration += result.apiCallDuration || 0;
+        });
+        
+        completedChunks = chunks.length;
+        failedChunks = 0;
+        console.log(`[${requestId}] All chunks processed in parallel`);
+      } catch (err) {
+        console.error(`[${requestId}] Error processing chunks in parallel:`, err);
+        failedChunks = chunks.length;
+        summaries.fill(`[Error processing content: ${err.message}]`);
       }
     } else {
       // Use parallel processing with dynamic worker pool
@@ -1218,62 +1289,80 @@ app.get('/api/summarize-stream', async (req, res) => {
       const batchCount = Math.ceil(chunks.length / batchSize);
       
       // Send a single batch count notification - ESSENTIAL
-      if (batchCount > 1) {
-        sendEvent('info', {
-          message: `Processing in ${batchCount} batches...`
-        });
-      }
+      sendEvent('info', {
+        message: `Processing in ${batchCount} batches to respect API rate limits...`
+      });
       
-      for (let i = 0; i < chunks.length; i += batchSize) {
-        const batch = [];
+      // Process batches sequentially
+      for (let batchIndex = 0; batchIndex < batchCount; batchIndex++) {
+        const batchStart = batchIndex * batchSize;
+        const batchEnd = Math.min(batchStart + batchSize, chunks.length);
+        const currentBatchChunks = chunks.slice(batchStart, batchEnd);
         
-        // Create batch of promises for parallel processing
-        for (let j = 0; j < batchSize && i + j < chunks.length; j++) {
-          const chunkIndex = i + j;
+        console.log(`[${requestId}] Processing batch ${batchIndex + 1}/${batchCount} (chunks ${batchStart + 1}-${batchEnd})`);
+        
+        // Process the current batch in parallel
+        try {
+          const batchPromises = currentBatchChunks.map((chunk, idx) => {
+            const chunkIndex = batchStart + idx;
+            return processChunkWithWorker(chunk, chunkIndex);
+          });
           
-          const processPromise = async () => {
-            try {
-              const result = await processChunkWithWorker(chunks[chunkIndex], chunkIndex);
-              summaries[chunkIndex] = result.summary;
-              completedChunks++;
-              return result;
-            } catch (err) {
-              console.error(`[${requestId}] Error processing chunk ${chunkIndex}:`, err);
+          const batchResults = await Promise.all(batchPromises);
+          
+          // Store results and track API durations
+          let batchApiDuration = 0;
+          batchResults.forEach((result, idx) => {
+            const chunkIndex = batchStart + idx;
+            summaries[chunkIndex] = result.summary;
+            
+            // Add to total API duration
+            const apiDuration = result.apiCallDuration || 0;
+            totalApiDuration += apiDuration;
+            batchApiDuration += apiDuration;
+          });
+          
+          completedChunks += currentBatchChunks.length;
+          
+          // Send batch completion message
+          console.log(`[${requestId}] Completed batch ${batchIndex + 1}/${batchCount} in ${batchApiDuration}ms of API time`);
+          sendEvent('progress', {
+            message: `Completed batch ${batchIndex + 1} of ${batchCount}`,
+            progress: Math.round((completedChunks / chunks.length) * 100)
+          });
+        } catch (err) {
+          console.error(`[${requestId}] Error processing batch ${batchIndex + 1}:`, err);
+          
+          // Mark failed chunks
+          for (let i = batchStart; i < batchEnd; i++) {
+            if (!summaries[i]) {
               failedChunks++;
-              summaries[chunkIndex] = `[Error processing this section: ${err.message}]`;
-              return null;
+              summaries[i] = `[Error processing this section]`;
             }
-          };
-          
-          batch.push(processPromise());
+          }
         }
         
-        // Wait for current batch to complete before starting next batch
-        await Promise.all(batch);
-        
-        // Only send batch completion events for multi-batch processing - ESSENTIAL
-        if (batchCount > 1) {
-          const batchNumber = Math.floor(i/batchSize) + 1;
-          sendEvent('progress', {
-            message: `Completed batch ${batchNumber} of ${batchCount}`,
-            progress: Math.round(Math.min(((i + batchSize) / chunks.length), 1) * 100)
-          });
+        // Add a small delay between batches to avoid rate limiting
+        if (batchIndex < batchCount - 1) {
+          const batchDelay = 1000; // 1 second between batches
+          console.log(`[${requestId}] Waiting ${batchDelay}ms before starting next batch`);
+          await new Promise(resolve => setTimeout(resolve, batchDelay));
         }
       }
     }
     
     console.log(`[${requestId}] Chunk processing completed`);
     console.log(`[${requestId}] Completed chunks: ${completedChunks}, Failed chunks: ${failedChunks}`);
+    console.log(`[${requestId}] Total API call duration for chunks: ${totalApiDuration}ms`);
     
     // If only one chunk was processed, return its summary
     if (summaries.length === 1) {
       perf.timeCheckpoints.end = Date.now();
       const totalTime = perf.timeCheckpoints.end - perf.timeCheckpoints.start;
-      console.log(`[${requestId}] Single chunk summary completed in ${totalTime}ms`);
+      console.log(`[${requestId}] Single chunk summary completed in ${totalTime}ms (API time: ${totalApiDuration}ms)`);
       
       sendEvent('result', {
-        summary: summaries[0],
-        processingTime: `${totalTime}ms`
+        summary: summaries[0]
       });
       cleanup();
       res.end();
@@ -1292,43 +1381,142 @@ app.get('/api/summarize-stream', async (req, res) => {
     });
     
     console.log(`[${requestId}] Creating meta-summary from ${validSummaries.length} processed chunks`);
+    console.log(`[${requestId}] DEBUG: validSummaries.length = ${validSummaries.length}, SHOULD SKIP META-SUMMARY: ${validSummaries.length <= 4}`);
     
-    // OPTIMIZATION: For small documents (2-3 chunks), skip the meta-summary process
-    // which is causing the bottleneck (21+ seconds in logs) and just combine the summaries
-    let metaSummary;
-    if (validSummaries.length <= 3) {
-      console.log(`[${requestId}] Using direct combination for small document (${validSummaries.length} chunks)`);
+    // OPTIMIZATION: Skip meta-summary for documents with 4 or fewer chunks
+    // This avoids unnecessary API call that takes 15-20 seconds
+    if (validSummaries.length <= 4 || validSummaries.length === 2) { // Explicitly handle 2 chunk case
+      console.log(`[${requestId}] Skipping meta-summary for small document (${validSummaries.length} chunks)`);
+      console.log(`[${requestId}] Using direct concatenation instead to save 15-20 seconds of processing time`);
       
-      // Simply join the summaries with section headers
+      // Simply join the summaries with section dividers
       const combinedSummary = validSummaries.map((summary, index) => {
-        if (validSummaries.length === 2) {
+        if (validSummaries.length === 1) {
+          // For a single chunk, don't add any section header
+          return summary;
+        } else if (validSummaries.length === 2) {
           // For two chunks, label them as first/second part
           return `## ${index === 0 ? 'First' : 'Second'} Part\n\n${summary}`;
         } else {
-          // For three chunks, use numbered parts
+          // For three or four chunks, use numbered parts
           return `## Part ${index + 1}\n\n${summary}`;
         }
       }).join('\n\n---\n\n');
       
-      metaSummary = {
+      const metaSummary = {
         summary: combinedSummary,
         model: 'direct-combination',
         processingTime: 0
       };
-    } else {
-      // Use the worker pool for the meta-summary
-      const metaSummaryTask = async () => createMetaSummary(validSummaries, chunks.length);
-      metaSummary = await workerPool.addTask(metaSummaryTask, 2000); // Highest priority
+      
+      perf.timeCheckpoints.end = Date.now();
+      const totalTime = perf.timeCheckpoints.end - perf.timeCheckpoints.start;
+      console.log(`[${requestId}] Complete summarization process finished in ${totalTime}ms`);
+      console.log(`[${requestId}] Meta-summary step skipped, saving ~15-20 seconds of processing time`);
+      
+      // Send final result with simplified data - no model or processing time info
+      sendEvent('result', {
+        summary: metaSummary.summary
+      });
+      cleanup();
+      res.end();
+      return;
     }
+    
+    // Only reach here for documents with more than 4 chunks
+    console.log(`[${requestId}] Large document with ${validSummaries.length} chunks, creating meta-summary`);
+    
+    // Use the worker pool for the meta-summary
+    const metaSummaryTask = async () => {
+      // Add section numbers for better context
+      const numberedSummaries = validSummaries.map((summary, index) => 
+        `## Section ${index + 1} of ${validSummaries.length}\n\n${summary}`
+      );
+      
+      const combinedSummaries = numberedSummaries.join("\n\n---\n\n");
+      // Use Haiku for faster meta-summaries
+      const model = 'claude-3-5-haiku-20241022';
+      
+      console.log(`[${requestId}] Creating meta-summary with model: ${model}`);
+      const startTime = Date.now();
+      
+      const maxRetries = 3;
+      let retryCount = 0;
+      
+      while (retryCount < maxRetries) {
+        try {
+          const apiStartTime = Date.now();
+          const response = await anthropic.messages.create({
+            model,
+            max_tokens: 3000,
+            temperature: 0.15,
+            system: SYSTEM_PROMPT,
+            messages: [
+              {
+                role: 'user',
+                content: `${META_SUMMARY_PROMPT} 
+
+Here are the individual summaries from different sections:
+
+${combinedSummaries}
+
+Create a single, coherent summary that integrates all sections while maintaining the structured format.`
+              }
+            ]
+          });
+          
+          const processingTime = Date.now() - apiStartTime;
+          const taskTotalTime = Date.now() - startTime;
+          console.log(`[${requestId}] Meta-summary created in ${processingTime}ms (total: ${taskTotalTime}ms) using ${model}`);
+          
+          return {
+            summary: response.content[0].text,
+            model,
+            processingTime
+          };
+        } catch (error) {
+          retryCount++;
+          const waitTime = 2 ** retryCount * 1000; // Exponential backoff
+          
+          console.error(`[${requestId}] Error creating meta-summary: ${error.message}`);
+          
+          if (retryCount >= maxRetries) {
+            console.error(`[${requestId}] All ${maxRetries} retry attempts failed for meta-summary`);
+            throw error;
+          }
+          
+          console.log(`[${requestId}] Waiting ${waitTime}ms before meta-summary retry ${retryCount}`);
+          await new Promise(resolve => setTimeout(resolve, waitTime));
+        }
+      }
+      
+      throw new Error("Failed to create meta-summary after retries");
+    };
+    
+    const metaSummary = await workerPool.addTask(metaSummaryTask, 2000); // Highest priority
     
     perf.timeCheckpoints.end = Date.now();
     const totalTime = perf.timeCheckpoints.end - perf.timeCheckpoints.start;
     console.log(`[${requestId}] Complete summarization process finished in ${totalTime}ms`);
     
-    // Send final result - ESSENTIAL
+    // Calculate performance metrics
+    const metaSummaryTime = metaSummary.processingTime || 0;
+    const apiDurationTotal = totalApiDuration + metaSummaryTime;
+    const apiCallCount = completedChunks + (metaSummary.model !== 'direct-combination' ? 1 : 0);
+    const overheadTime = totalTime - apiDurationTotal;
+    const apiTimePercentage = Math.round((apiDurationTotal / totalTime) * 100);
+    
+    console.log(`[${requestId}] Performance Summary:`);
+    console.log(`[${requestId}] - Total time: ${totalTime}ms`);
+    console.log(`[${requestId}] - API time: ${apiDurationTotal}ms (${apiTimePercentage}%)`);
+    console.log(`[${requestId}] - Chunk processing: ${totalApiDuration}ms`);
+    console.log(`[${requestId}] - Meta-summary: ${metaSummaryTime}ms`);
+    console.log(`[${requestId}] - Overhead: ${overheadTime}ms`);
+    console.log(`[${requestId}] - API calls: ${apiCallCount}`);
+    
+    // Send final result with simplified data - no model or processing time info
     sendEvent('result', {
-      summary: metaSummary.summary,
-      processingTime: `${totalTime}ms`
+      summary: metaSummary.summary
     });
     cleanup();
     res.end();
@@ -1405,97 +1593,6 @@ app.get('/api/summarize', async (req, res) => {
     });
   }
 });
-
-// Create a meta-summary from individual summaries - optimized version
-async function createMetaSummary(summaries, originalChunkCount) {
-  // OPTIMIZATION: For small documents with just 2-3 chunks, skip meta-summarization
-  // and concatenate summaries with section headers instead
-  if (summaries.length <= 3) {
-    console.log(`Skipping meta-summary for small document (${summaries.length} chunks)`);
-    
-    // Simply join the summaries with section dividers
-    const combinedSummary = summaries.map((summary, index) => {
-      if (summaries.length === 2) {
-        // For two chunks, label them as first/second part
-        return `## ${index === 0 ? 'First' : 'Second'} Part\n\n${summary}`;
-      } else {
-        // For three chunks, use numbered parts
-        return `## Part ${index + 1}\n\n${summary}`;
-      }
-    }).join('\n\n---\n\n');
-    
-    return {
-      summary: combinedSummary,
-      model: 'direct-combination',
-      processingTime: 0
-    };
-  }
-  
-  const maxRetries = 3;
-  let retryCount = 0;
-  
-  // Add section numbers for better context
-  const numberedSummaries = summaries.map((summary, index) => 
-    `## Section ${index + 1} of ${summaries.length}\n\n${summary}`
-  );
-  
-  const combinedSummaries = numberedSummaries.join("\n\n---\n\n");
-  // Use Haiku for faster meta-summaries
-  const model = 'claude-3-5-haiku-latest';
-  
-  console.log(`Creating meta-summary from ${summaries.length} chunks (original content had ${originalChunkCount} chunks)`);
-  console.log(`Using model: ${model} for meta-summary generation`);
-  const startTime = Date.now();
-  
-  while (retryCount < maxRetries) {
-    try {
-      const apiStartTime = Date.now();
-      const response = await anthropic.messages.create({
-        model,
-        max_tokens: 2000,
-        temperature: 0.15,
-        system: SYSTEM_PROMPT,
-        messages: [
-          {
-            role: 'user',
-            content: `${META_SUMMARY_PROMPT} 
-
-Here are the individual summaries from different sections:
-
-${combinedSummaries}
-
-Create a single, coherent summary that integrates all sections while maintaining the structured format.`
-          }
-        ]
-      });
-      
-      const processingTime = Date.now() - apiStartTime;
-      const totalTime = Date.now() - startTime;
-      console.log(`Meta-summary created in ${processingTime}ms (total: ${totalTime}ms) using ${model}`);
-      
-      return {
-        summary: response.content[0].text,
-        model,
-        processingTime
-      };
-    } catch (error) {
-      retryCount++;
-      const waitTime = 2 ** retryCount * 1000; // Exponential backoff
-      
-      console.error(`Error creating meta-summary: ${error.message}`);
-      
-      if (retryCount >= maxRetries) {
-        console.error(`All ${maxRetries} retry attempts failed for meta-summary`);
-        throw error;
-      }
-      
-      console.log(`Waiting ${waitTime}ms before meta-summary retry ${retryCount}`);
-      await new Promise(resolve => setTimeout(resolve, waitTime));
-    }
-  }
-  
-  throw new Error("Failed to create meta-summary after retries");
-}
 
 // Start the server
 app.listen(PORT, () => {
