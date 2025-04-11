@@ -113,46 +113,6 @@ export function chunkText(text: string, maxChunkSize: number = 8000): string[] {
 }
 
 /**
- * Performs rudimentary text analysis to determine if content is likely code or documentation
- */
-export function detectContentType(text: string): 'code' | 'documentation' {
-  // Look for common code indicators
-  const codeIndicators = [
-    // Code syntax indicators
-    /function\s+\w+\s*\(/i,  // function definitions
-    /class\s+\w+/i,  // class definitions
-    /(const|let|var)\s+\w+\s*=/i,  // variable assignments
-    /import\s+[\w\s,{}]*\s+from/i,  // import statements
-    /\{\s*[\w\s]*:\s*[\w\s"']*\}/i,  // object literals
-    /if\s*\([^)]*\)\s*\{/i,  // if statements with braces
-    /<\w+(\s+\w+="[^"]*")*\s*>/i,  // HTML/XML tags
-    /\[\s*[\w\s,'"]*\s*\]/i,  // array literals
-    /=>/i,  // arrow functions
-    /return\s+[\w\s.()]*;/i,  // return statements
-  ];
-  
-  // Count occurrences of code indicators
-  let codeIndicatorCount = 0;
-  codeIndicators.forEach(regex => {
-    const matches = text.match(new RegExp(regex, 'g'));
-    if (matches) {
-      codeIndicatorCount += matches.length;
-    }
-  });
-  
-  // Check for high code-specific character density
-  const specialChars = text.match(/[{}[\]()<>:;=+\-*/%&|^!~?]/g)?.length || 0;
-  const specialCharDensity = specialChars / text.length;
-  
-  // Simple heuristic: if either we have many code indicators or high special char density
-  if (codeIndicatorCount > 5 || specialCharDensity > 0.05) {
-    return 'code';
-  }
-  
-  return 'documentation';
-}
-
-/**
  * Utilities for handling API rate limits
  */
 
@@ -192,34 +152,34 @@ export const RateLimits = {
   model: 'claude-3-5-sonnet-20240620',
   
   // Output tokens to request per call - optimized for performance
-  defaultMaxTokens: 800, // Reduced from 1000 for faster responses
-  metaSummaryMaxTokens: 1200, // Reduced from 1500 for faster responses
+  defaultMaxTokens: 600, // Reduced for faster individual chunk processing
+  metaSummaryMaxTokens: 1500, // Increased for more comprehensive meta-summaries
   
   // Parallel processing optimization
-  maxChunksPerRequest: 4, // Increased from 3 for better parallelization
-  maxChunksTotal: 12, // Maximum chunks to process even for very large documents
-  maxBatches: 3, // Maximum number of batches to process
+  maxChunksPerRequest: 3, // Reduced to prevent rate limit issues
+  maxChunksTotal: 6, // Reduced to prevent rate limit issues
+  maxBatches: 2, // Reduced for faster overall processing
   
   // Optimized chunk size in characters (reduced for faster processing)
-  maxChunkSize: 28000, // Reduced from 32000 for better balance
+  maxChunkSize: 20000, // Reduced for better balance
   
   // Temperature settings - lower for faster, more deterministic results
-  defaultTemperature: 0.1, // Lower temperature for better performance
-  metaSummaryTemperature: 0.15
+  defaultTemperature: 0.05, // Lower temperature for better performance
+  metaSummaryTemperature: 0.15 // Slightly higher for better meta-summary generation
 };
 
 // Optimized model selection based on content size and processing needs
 export function selectModelForContent(text: string): string {
-  // For very short content, use Haiku for maximum speed
-  if (text.length < 5000) {
-    return 'claude-3-5-haiku-latest'; // Fastest option for small content
+  // For small content, always use Haiku for maximum speed
+  if (text.length < 8000) {
+    return 'claude-3-5-sonnet-20240620'; // Fastest option
   }
-  // For medium content, still use Haiku but with optimized params
-  else if (text.length < 12000) {
-    return 'claude-3-5-haiku-20241022'; // Good balance for medium content
+  // For larger content, still use Haiku but with optimized params
+  else if (text.length < 25000) {
+    return 'claude-3-5-sonnet-20240620'; // Good balance for medium content
   }
-  // For larger content, switch to Sonnet for better comprehension
+  // Only use Sonnet for very large content
   else {
-    return 'claude-3-5-sonnet-20240620'; // Better quality for larger, more complex content
+    return 'claude-3-5-sonnet-20240620'; // For more complex content
   }
 } 

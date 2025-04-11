@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import Anthropic from '@anthropic-ai/sdk';
 import { getAnthropicApiKey, isApiConfigured } from '@/utils/env';
-import { chunkText, detectContentType, extractRateLimitInfo, RateLimits, RateLimitInfo, selectModelForContent } from '@/utils/textProcessing';
+import { chunkText, extractRateLimitInfo, RateLimits, RateLimitInfo, selectModelForContent } from '@/utils/textProcessing';
 
 // Initialize with API key
 const apiKey = getAnthropicApiKey();
@@ -12,70 +12,167 @@ const anthropic = new Anthropic({
 });
 
 // Prompts used for summarization
-const SYSTEM_PROMPT = `You are an AI Documentation and Code Analysis Agent specializing in extracting key insights from technical content.
+const SYSTEM_PROMPT = `You are an AI Documentation and Code Analysis Agent specializing in extracting business-critical insights from technical content.
 
-Your task is to analyze and summarize technical documents, code, or implementation details in a highly structured format.
+Your task is to analyze technical documents or code and create summaries that maximize knowledge transfer and developer productivity.
 
 You MUST follow these output format requirements:
-1. Begin with a "## Overview" section that provides a high-level summary in 1-3 sentences
-2. Include a "## Key Components" section with bullet points for main components/concepts
-3. Include a "## Implementation Details" section with the most important technical specifics
-4. If applicable, include a "## Usage Example" section showing how to use a component/api/function
-5. End with a "## Limitations and Considerations" section that outlines any constraints or important notes
+1. Begin with a "## Key Takeaways" section highlighting the 2-3 most important insights for developers
+2. Include a "## Core Concepts" section with bullet points for main components/concepts explained in plain language
+3. Include a "## Implementation Path" section with specific steps needed to make it work successfully
+4. Add a "## Time-Saving Patterns" section that highlights reusable strategies applicable across projects
+5. Include a "## Risk Mitigation" section with common errors, debugging tips, architectural anti-patterns, and security considerations
+6. End with a "## Business Impact" section that outlines efficiency gains, cost savings, or other business value
 
-Use Markdown formatting for all output. Keep the summary clear, concise, and technically accurate.
-Maintain a neutral, professional tone throughout.`;
+Keep language clear and concise. Aim to save developer time through effective knowledge transfer.
 
-// Enhanced primary summarization prompt with better content-specific guidance
-const SUMMARY_PROMPT = `Analyze and extract key information from the following technical content.
+Here are examples of well-formatted summaries for both code and documentation:
 
-Focus on:
-- Core functionality and purpose
-- Architecture and design patterns
-- API interfaces and contracts
-- Key algorithms or processing logic
-- Dependencies and integration points
+EXAMPLE CODE SUMMARY:
+## Key Takeaways
+- This authentication service implements JWT token validation with role-based access control
+- Uses a Redis cache to minimize database lookups, reducing latency by ~80%
 
-For CODE:
-- Identify class/function relationships
-- Note architectural patterns (MVC, observer, etc.)
-- Highlight error handling approaches
-- Extract API contracts and interfaces
-- Focus on control flow and data transformations
+## Core Concepts
+- **JWT Authentication**: Stateless token validation with encoded permissions
+- **Role Hierarchy**: Admin > Manager > User permission cascade
+- **Cache Strategy**: Two-tier caching (in-memory + Redis) with 15-minute TTL
 
-For DOCUMENTATION:
-- Extract conceptual frameworks
-- Identify setup and configuration requirements
-- Highlight best practices and recommendations
-- Note versioning and compatibility information
-- Capture user workflow patterns
+## Implementation Path
+1. Initialize the AuthClient with your API keys
+2. Call auth.validateToken() before protected route handlers
+3. Check permissions with auth.hasAccess(user, requiredRole)
+4. Refresh tokens via auth.refreshTokens() when expired
 
-Return your analysis in the structured format specified in your instructions, using Markdown formatting.`;
+## Time-Saving Patterns
+- Use AuthGuard middleware pattern to avoid repetitive checks
+- Leverage batch token validation for sequential API calls
+- Implement exception-based flow rather than verbose condition checking
 
-// Significantly enhanced meta-summarization prompt
-const META_SUMMARY_PROMPT = `Synthesize the following section summaries into a coherent, unified technical summary.
+## Risk Mitigation
+- Token hijacking: Implement IP binding with auth.linkToClientIP()
+- Cache poisoning: Set strict TTL and validate against source-of-truth on write
+- Failed refresh: Implement auth.gracefulDegradation() for outage handling
+- DoS vulnerability: Enable auth.enableRateLimiting() in production
 
-IMPORTANT GUIDELINES:
-1. CREATE A UNIFIED NARRATIVE - not just a collection of sections
-2. RESOLVE CONTRADICTIONS between sections by favoring more specific information
-3. ELIMINATE REDUNDANCY - consolidate repeated information
-4. PRESERVE TECHNICAL PRECISION - maintain accuracy over brevity
-5. ESTABLISH CLEAR HIERARCHIES - organize concepts from foundational to specific
-6. CONNECT RELATED CONCEPTS across different sections
-7. HIGHLIGHT CROSS-CUTTING CONCERNS that appear in multiple sections
-8. MAINTAIN THE REQUIRED STRUCTURED FORMAT with all sections
+## Business Impact
+- Reduces authentication overhead from ~120ms to ~15ms per request
+- Cuts server load by 40% through optimized token validation
+- Projected savings of 2-3 development days per project through reusable patterns
+- Enables compliance with SOC2 and GDPR through audit trail options
 
-For CODE meta-summaries:
-- Reconstruct the overall architecture from component descriptions
-- Create a mental model of the system's operation
-- Connect implementation details to architectural patterns
+EXAMPLE DOCUMENTATION SUMMARY:
+## Key Takeaways
+- AWS Lambda cold starts can be reduced by 70% using provisioned concurrency
+- Lambda Layers should be used for dependencies >5MB to optimize deployment
 
-For DOCUMENTATION meta-summaries:
-- Organize information from conceptual to practical
-- Establish relationships between different workflows
-- Ensure configuration details connect to their relevant features
+## Core Concepts
+- **Provisioned Concurrency**: Pre-initialized Lambda instances
+- **Lambda Layers**: Reusable code packages shared across functions
+- **Execution Context Reuse**: Strategy to maintain state between invocations
 
-Below are summaries of different sections. Create a single coherent summary that follows the structured format in your instructions.`;
+## Implementation Path
+1. Analyze current Lambda metrics for cold start frequency
+2. Apply provisioned concurrency to high-traffic functions via AWS CLI or Console
+3. Move dependencies to Lambda Layers with compatibility version tagging
+4. Implement keep-warm mechanisms for non-provisioned functions
+
+## Time-Saving Patterns
+- Use CloudFormation templates for consistent Lambda configurations
+- Implement shared testing framework for Lambda unit and integration tests
+- Apply parameter store pattern for configuration rather than environment variables
+
+## Risk Mitigation
+- Cost overruns: Implement auto-scaling of provisioned concurrency based on traffic
+- Missing dependencies: Use layer versioning and compatibility check scripts
+- Wrong IAM permissions: Apply least-privilege templates from security-validated repository
+- Cold starts in VPC: Place Lambdas in private subnets with pre-allocated ENIs
+
+## Business Impact
+- Saves 1-2 days of debugging time per development cycle
+- Reduces average API latency by 65% on first request
+- Lowers Lambda costs by 30% through optimized execution and shared layers
+- Enables standard deployment patterns that reduce onboarding time by 50%`;
+
+// Optimized primary summarization prompt
+const SUMMARY_PROMPT = `Analyze the following technical content and create a summary that maximizes knowledge transfer and developer productivity.
+
+Examine the content and determine whether it's primarily CODE or DOCUMENTATION:
+- CODE: Source files, scripts, API implementations, class definitions
+- DOCS: Tutorials, architecture overviews, configuration guides, API references
+
+For CODE content:
+- Focus on implementation patterns, reusable components, and error-handling approaches that save time
+- Flag complex logic blocks that would benefit from additional documentation
+- Identify optimization opportunities in the implementation
+
+For DOCS content:
+- Focus on workflows, configuration shortcuts, and best practices that prevent common pitfalls
+- Identify any missing information that would help developers implement more effectively
+- Highlight areas where documentation could be expanded for clarity
+
+Your goal is to create a summary that would save a developer hours of reading time while preserving all essential information for successful implementation.`;
+
+// Optimized meta-summarization prompt
+const META_SUMMARY_PROMPT = `Synthesize these section summaries into a unified technical summary that maximizes business value and developer productivity.
+
+Guidelines:
+1. Consolidate repetitive concepts across sections
+2. Highlight workflows that reduce implementation time 
+3. Identify patterns that can be reused across projects
+4. Quantify potential time savings using these reference benchmarks:
+   - Simple implementation: 2-4 hours saved
+   - Medium complexity: 1-2 days saved
+   - Architectural impact: Weeks saved
+5. Emphasize scalable approaches that work across team boundaries
+6. Flag any efficiency bottlenecks or areas for optimization
+7. Structure information to minimize cognitive load for new developers
+
+Examine the content and determine whether it's primarily CODE or DOCUMENTATION:
+- For CODE: Emphasize architectural patterns that promote maintainability and team collaboration
+- For DOCS: Highlight onboarding shortcuts and knowledge-sharing approaches
+
+Prioritize insights that:
+1. Enable cross-team collaboration
+2. Reduce onboarding time for new developers
+3. Prevent production incidents
+4. Optimize cloud resource usage
+
+Below are summaries of different sections. Create a cohesive summary that maximizes knowledge transfer efficiency.
+
+Here's an example of a good meta-summary:
+
+## Key Takeaways
+- This distributed caching system reduces API response times by 80% (from 120ms to 24ms)
+- Implements a write-through cache pattern with conflict resolution to prevent data inconsistency
+
+## Core Concepts
+- **Multi-level Caching**: Browser → CDN → API cache → Database approach
+- **Cache Invalidation**: Event-driven invalidation with version control
+- **Conflict Resolution**: Last-write-wins with vector clocks for distributed scenarios
+
+## Implementation Path
+1. Configure Redis cluster with the provided terraform modules
+2. Implement CacheClient with appropriate serialization for your data types
+3. Add cache lookup before database queries using the middleware pattern
+4. Set up cache invalidation consumers for the messaging system
+
+## Time-Saving Patterns
+- Use the CacheAside decorator on repository methods to simplify cache logic
+- Implement BackgroundRefresh pattern to eliminate cache misses during high traffic
+- Apply CircuitBreaker pattern for graceful degradation when cache is unavailable
+
+## Risk Mitigation
+- Memory pressure: Implement TTL-based eviction policies with size limits
+- Network partition: Configure fallback to database with automatic reconnection
+- Cache stampede: Apply exponential backoff and jitter to refresh attempts
+- Data leakage: Enable encryption-at-rest and sanitize sensitive fields
+
+## Business Impact
+- Reduces infrastructure costs by approximately $12,000/year through improved efficiency
+- Saves 3+ development days per project by standardizing caching approaches
+- Improves user experience with 80% faster page loads and reduced timeouts
+- Enables scaling to 5x current traffic without additional database resources`;
 
 // Helper function to safely extract rate limit info from response
 function getRateLimitInfo(response: any): RateLimitInfo {
@@ -100,31 +197,19 @@ async function processChunk(text: string, chunkIndex?: number) {
   const startTime = Date.now();
   console.log(`[Chunk ${chunkIndex !== undefined ? chunkIndex + 1 : 'single'}] Starting processing (${text.length} chars) with ${model}`);
   
-  // Detect if content is primarily code or documentation
-  const contentType = detectContentType(text);
-  console.log(`[Chunk ${chunkIndex !== undefined ? chunkIndex + 1 : 'single'}] Detected content type: ${contentType}`);
-  
-  // Adapt prompt based on content type
-  let adaptedPrompt = SUMMARY_PROMPT;
-  if (contentType === 'code') {
-    adaptedPrompt = `${SUMMARY_PROMPT}\n\nThis content appears to be code. Focus on architecture, functions, classes, and implementation patterns. Include code structure and key algorithms.`;
-  } else {
-    adaptedPrompt = `${SUMMARY_PROMPT}\n\nThis content appears to be documentation. Focus on concepts, workflows, API details, and usage guidelines.`;
-  }
-
   while (retryCount < maxRetries) {
     try {
       const apiStartTime = Date.now();
       
       const response = await anthropic.messages.create({
         model,
-        max_tokens: 4000,
+        max_tokens: RateLimits.defaultMaxTokens,
         temperature: RateLimits.defaultTemperature,
         system: SYSTEM_PROMPT,
         messages: [
           {
             role: 'user',
-            content: `${adaptedPrompt} ${text}`
+            content: `${SUMMARY_PROMPT} ${text}`
           }
         ]
       });
@@ -144,7 +229,6 @@ async function processChunk(text: string, chunkIndex?: number) {
         rateLimitInfo,
         model,
         processingTime,
-        contentType,
         chunkIndex
       };
     } catch (error: any) {
@@ -170,18 +254,15 @@ async function processChunk(text: string, chunkIndex?: number) {
 async function createMetaSummary(summaries: string[], originalChunkCount: number) {
   const maxRetries = 3;
   let retryCount = 0;
-  const combinedSummaries = summaries.join("\n\n---\n\n");
-  const model = selectModelForContent(combinedSummaries);
   
-  // Determine if we're summarizing mostly code or documentation
-  const contentType = detectContentType(combinedSummaries);
-  let adaptedMetaPrompt = META_SUMMARY_PROMPT;
+  // Add section numbers for better context
+  const numberedSummaries = summaries.map((summary, index) => 
+    `## Section ${index + 1} of ${summaries.length}\n\n${summary}`
+  );
   
-  if (contentType === 'code') {
-    adaptedMetaPrompt = `${META_SUMMARY_PROMPT}\n\nThis summary is primarily about code. Ensure your meta-summary emphasizes architecture, functions, and implementation patterns. Maintain the structured format.`;
-  } else {
-    adaptedMetaPrompt = `${META_SUMMARY_PROMPT}\n\nThis summary is primarily about documentation. Ensure your meta-summary emphasizes concepts, workflows, and usage guidelines. Maintain the structured format.`;
-  }
+  const combinedSummaries = numberedSummaries.join("\n\n---\n\n");
+  // Always use Sonnet for meta-summaries to ensure best quality
+  const model = 'claude-3-5-sonnet-20240620';
   
   console.log(`Creating meta-summary from ${summaries.length} chunks (original content had ${originalChunkCount} chunks)`);
   console.log(`Using model: ${model} for meta-summary generation`);
@@ -192,13 +273,19 @@ async function createMetaSummary(summaries: string[], originalChunkCount: number
       const apiStartTime = Date.now();
       const response = await anthropic.messages.create({
         model,
-        max_tokens: 4000,
+        max_tokens: RateLimits.metaSummaryMaxTokens,
         temperature: RateLimits.metaSummaryTemperature,
         system: SYSTEM_PROMPT,
         messages: [
           {
             role: 'user',
-            content: `${adaptedMetaPrompt} Here are the individual summaries:\n\n${combinedSummaries}`
+            content: `${META_SUMMARY_PROMPT} 
+
+Here are the individual summaries from different sections:
+
+${combinedSummaries}
+
+Create a single, coherent summary that integrates all sections while maintaining the structured format.`
           }
         ]
       });
@@ -214,8 +301,7 @@ async function createMetaSummary(summaries: string[], originalChunkCount: number
         summary: response.content[0].text,
         rateLimitInfo,
         model,
-        processingTime,
-        contentType
+        processingTime
       };
     } catch (error: any) {
       retryCount++;
@@ -360,8 +446,7 @@ export async function POST(request: NextRequest) {
         summary: result.summary,
         model: result.model,
         processingTime: `${totalTime}ms`,
-        rateLimitInfo: result.rateLimitInfo,
-        contentType: result.contentType
+        rateLimitInfo: result.rateLimitInfo
       });
     }
     
@@ -395,8 +480,7 @@ export async function POST(request: NextRequest) {
         processedChunks: 1,
         model: summaries[0].model,
         processingTime: `${totalTime}ms`,
-        rateLimitInfo: summaries[0].rateLimitInfo,
-        contentType: summaries[0].contentType
+        rateLimitInfo: summaries[0].rateLimitInfo
       });
     }
     
@@ -416,8 +500,7 @@ export async function POST(request: NextRequest) {
       processedChunks: chunksToProcess.length,
       model: metaSummary.model,
       processingTime: `${totalTime}ms`,
-      rateLimitInfo: metaSummary.rateLimitInfo,
-      contentType: metaSummary.contentType
+      rateLimitInfo: metaSummary.rateLimitInfo
     });
   } catch (error: any) {
     console.error('Error during summarization:', error);
@@ -444,4 +527,4 @@ export async function POST(request: NextRequest) {
       error: `Summarization failed: ${error.message}`
     }, { status: 500 });
   }
-} 
+}
