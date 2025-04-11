@@ -1,7 +1,7 @@
 # Summify: AI-Powered Documentation and Code Summarization
 
 
-Summify is an advanced AI tool designed to quickly summarize technical documentation and code, helping developers understand complex codebases faster and more efficiently.
+Summify is an advanced AI tool designed to summarize technical documentation and code, helping developers understand complex codebases faster and more efficiently.
 
 ## 🌟 [Live Demo](https://summify-seven.vercel.app/)
 
