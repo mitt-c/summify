@@ -22,6 +22,12 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [modelInfoMap, setModelInfoMap] = useState<Record<string, string>>({});
+  const [processingProgress, setProcessingProgress] = useState<{
+    status: string;
+    progress: number;
+    currentChunk: number;
+    totalChunks: number;
+  } | null>(null);
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -77,6 +83,7 @@ export default function Home() {
     setText('');
     setLoading(true);
     setError('');
+    setProcessingProgress(null);
     
     // Reset textarea height after sending
     resetTextarea();
@@ -85,7 +92,17 @@ export default function Home() {
       // Get the backend URL from environment variable
       const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:3001';
       
-      // Send the request directly to the backend API
+      // Create placeholder for assistant response
+      const placeholderId = `placeholder-${Date.now()}`;
+      const placeholderMessage: Message = {
+        id: placeholderId,
+        type: 'assistant',
+        content: 'Processing your content...',
+      };
+      
+      setMessages(prev => [...prev, placeholderMessage]);
+      
+      // Send the request directly to the backend API with streaming support
       const response = await fetch(`${backendUrl}/api/summarize`, {
         method: 'POST',
         headers: {
@@ -94,58 +111,153 @@ export default function Home() {
         body: JSON.stringify({ text: userMessage.content }),
       });
       
-      const data = await response.json();
-      
       if (!response.ok) {
-        if (response.status === 429 && data.retryAfter) {
-          throw new Error(`Rate limit exceeded. Please try again in ${data.retryAfter} seconds.`);
+        const errorData = await response.json();
+        if (response.status === 429 && errorData.retryAfter) {
+          throw new Error(`Rate limit exceeded. Please try again in ${errorData.retryAfter} seconds.`);
         }
-        if (response.status === 503 && data.isOverloaded) {
-          throw new Error(`${data.error} This is a temporary issue with the AI service.`);
+        if (response.status === 503 && errorData.isOverloaded) {
+          throw new Error(`${errorData.error} This is a temporary issue with the AI service.`);
         }
-        throw new Error(data.error || 'Failed to summarize');
+        throw new Error(errorData.error || 'Failed to summarize');
       }
       
-      // Add assistant response
-      const assistantMessage: Message = {
-        id: (Date.now() + 1).toString(),
-        type: 'assistant',
-        content: data.summary,
-        contentType: data.contentType
-      };
-      
-      setMessages(prev => [...prev, assistantMessage]);
-      
-      // Build model info string
-      let infoText = `Model: ${data.model || 'Unknown'}`;
-      
-      // Add content type if available
-      if (data.contentType) {
-        infoText += ` | Content type: ${data.contentType}`;
-      }
-      
-      if (data.chunkCount) {
-        infoText += ` | Text was split into ${data.chunkCount} chunks`;
-        if (data.processedChunks && data.processedChunks < data.chunkCount) {
-          infoText += ` (processed ${data.processedChunks} chunks)`;
+      // Handle streaming response if available
+      if (response.headers.get('Transfer-Encoding') === 'chunked') {
+        const reader = response.body?.getReader();
+        const decoder = new TextDecoder();
+        let finalData: any = {};
+        let summary = '';
+        
+        if (reader) {
+          try {
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              
+              const chunk = decoder.decode(value, { stream: true });
+              const lines = chunk.split('\n').filter(line => line.trim());
+              
+              for (const line of lines) {
+                try {
+                  const data = JSON.parse(line);
+                  
+                  // Handle progress updates
+                  if (data.status === 'chunk_complete') {
+                    setProcessingProgress({
+                      status: 'processing',
+                      progress: data.progress,
+                      currentChunk: data.chunkIndex + 1,
+                      totalChunks: data.totalChunks
+                    });
+                    
+                    // Update placeholder message to show progress
+                    setMessages(prev => 
+                      prev.map(msg => 
+                        msg.id === placeholderId 
+                          ? { ...msg, content: `Processing... ${data.progress}% complete` }
+                          : msg
+                      )
+                    );
+                  } 
+                  // Handle final result
+                  else if (data.summary) {
+                    finalData = data;
+                    summary = data.summary;
+                  }
+                } catch (e) {
+                  console.error('Error parsing JSON from stream:', e);
+                }
+              }
+            }
+          } finally {
+            reader.releaseLock();
+          }
         }
+        
+        // Create final assistant message with the summary
+        if (summary) {
+          const assistantMessage: Message = {
+            id: (Date.now() + 1).toString(),
+            type: 'assistant',
+            content: summary,
+            contentType: finalData.contentType
+          };
+          
+          // Replace placeholder with actual response
+          setMessages(prev => prev.map(msg => 
+            msg.id === placeholderId ? assistantMessage : msg
+          ));
+          
+          // Build model info string
+          let infoText = `Model: ${finalData.model || 'Unknown'}`;
+          
+          // Add content type if available
+          if (finalData.contentType) {
+            infoText += ` | Content type: ${finalData.contentType}`;
+          }
+          
+          if (finalData.chunkCount) {
+            infoText += ` | Text was split into ${finalData.chunkCount} chunks`;
+            if (finalData.processedChunks && finalData.processedChunks < finalData.chunkCount) {
+              infoText += ` (processed ${finalData.processedChunks} chunks)`;
+            }
+          }
+          
+          // Add processing time if available
+          if (finalData.processingTime) {
+            infoText += ` | Processing time: ${finalData.processingTime}`;
+          }
+          
+          setModelInfoMap(prev => ({ ...prev, [assistantMessage.id]: infoText }));
+          setProcessingProgress(null);
+        }
+      } else {
+        // Fallback to non-streaming response
+        const data = await response.json();
+        
+        // Add assistant response
+        const assistantMessage: Message = {
+          id: (Date.now() + 1).toString(),
+          type: 'assistant',
+          content: data.summary,
+          contentType: data.contentType
+        };
+        
+        // Replace placeholder with actual response
+        setMessages(prev => prev.map(msg => 
+          msg.id === placeholderId ? assistantMessage : msg
+        ));
+        
+        // Build model info string
+        let infoText = `Model: ${data.model || 'Unknown'}`;
+        
+        // Add content type if available
+        if (data.contentType) {
+          infoText += ` | Content type: ${data.contentType}`;
+        }
+        
+        if (data.chunkCount) {
+          infoText += ` | Text was split into ${data.chunkCount} chunks`;
+          if (data.processedChunks && data.processedChunks < data.chunkCount) {
+            infoText += ` (processed ${data.processedChunks} chunks)`;
+          }
+        }
+        
+        // Add processing time if available
+        if (data.processingTime) {
+          infoText += ` | Processing time: ${data.processingTime}`;
+        }
+        
+        setModelInfoMap(prev => ({ ...prev, [assistantMessage.id]: infoText }));
       }
-      
-      // Add processing time if available
-      if (data.processingTime) {
-        infoText += ` | Processing time: ${data.processingTime}`;
-      }
-      
-      // Add rate limit info if available
-      if (data.rateLimitInfo?.requestsRemaining) {
-        infoText += ` | API requests remaining: ${data.rateLimitInfo.requestsRemaining}`;
-      }
-      
-      setModelInfoMap(prev => ({ ...prev, [assistantMessage.id]: infoText }));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'An error occurred');
+      // Remove placeholder message on error
+      setMessages(prev => prev.filter(msg => !msg.id.startsWith('placeholder-')));
     } finally {
       setLoading(false);
+      setProcessingProgress(null);
     }
   };
 
@@ -224,11 +336,29 @@ export default function Home() {
                     </div>
                     <span className="ml-3 text-sm text-gray-300 font-medium">Summarizing your content...</span>
                   </div>
-                  <p className="text-xs text-gray-400 mt-2">
-                    {text.length > 10000 
-                      ? "This may take a minute for larger content..."
-                      : "Generating a concise, structured summary..."}
-                  </p>
+                  
+                  {processingProgress && (
+                    <div className="mt-3">
+                      <div className="w-full bg-gray-700 rounded-full h-1.5">
+                        <div 
+                          className="bg-indigo-500 h-1.5 rounded-full transition-all duration-300 ease-in-out" 
+                          style={{ width: `${processingProgress.progress}%` }}
+                        ></div>
+                      </div>
+                      <p className="text-xs text-gray-400 mt-2">
+                        Processing chunk {processingProgress.currentChunk} of {processingProgress.totalChunks} 
+                        ({processingProgress.progress}% complete)
+                      </p>
+                    </div>
+                  )}
+                  
+                  {!processingProgress && (
+                    <p className="text-xs text-gray-400 mt-2">
+                      {text.length > 10000 
+                        ? "This may take a minute for larger content..."
+                        : "Generating a concise, structured summary..."}
+                    </p>
+                  )}
                 </div>
               </div>
             )}

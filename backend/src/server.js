@@ -39,75 +39,371 @@ const anthropic = new Anthropic({
 });
 
 // Constants and configuration
-const MAX_CHUNK_SIZE = 20000;
+const MAX_CHUNK_SIZE = 15000;
+const MAX_PARALLEL_CHUNKS = 3; // Process up to 3 chunks in parallel
 
 // Prompts used for summarization
-const SYSTEM_PROMPT = `You are an AI Documentation and Code Analysis Agent specializing in extracting business-critical insights from technical content.
+const SYSTEM_PROMPT = `You are an AI Technical Content Summarizer specializing in making complex code and documentation immediately useful to developers.
 
-Your task is to analyze technical documents or code and create summaries that maximize knowledge transfer and developer productivity.
+Your task is to analyze technical content and create a summary that maximizes developer productivity. Focus on what's actually important for implementation, not theoretical descriptions.
 
-You MUST follow these output format requirements:
-1. Begin with a "## Key Takeaways" section highlighting the 2-3 most important insights for developers
-2. Include a "## Core Concepts" section with bullet points for main components/concepts explained in plain language
-3. Include a "## Implementation Path" section with specific steps needed to make it work successfully
-4. Add a "## Time-Saving Patterns" section that highlights reusable strategies applicable across projects
-5. Include a "## Risk Mitigation" section with common errors, debugging tips, architectural anti-patterns, and security considerations
-6. Add a "## Problem Areas" section that identifies technical debt, unclear explanations, missing documentation, or problematic implementations
-7. End with a "## Business Impact" section that outlines efficiency gains, cost savings, or other business value
+For your output, follow this structure:
+1. "## TL;DR" - 2-3 sentence executive summary
+2. "## Core Components" - Identify key classes, functions, modules, or concepts with brief explanations of their purpose
+3. "## Implementation Guide" - Step-by-step instructions for implementing or using the technology
+4. "## Dependencies & Prerequisites" - Required libraries, services, environment setup
+5. "## Key Design Patterns & Architecture" - Notable patterns, data flows, or architectural decisions
+6. "## Gotchas & Edge Cases" - Common errors, pitfalls, limitations, and how to avoid them
+7. "## Debugging & Troubleshooting" - How to diagnose and fix common issues
+8. "## Performance Considerations" - Bottlenecks, optimization opportunities, scaling concerns
 
-Keep language clear and concise. Aim to save developer time through effective knowledge transfer.`;
+Keep explanations concise and code-focused. Prioritize actual implementation details over general descriptions.`;
 
-// Optimized primary summarization prompt
-const SUMMARY_PROMPT = `Analyze the following technical content and create a summary that maximizes knowledge transfer and developer productivity.
+// Specialized prompt for code
+const CODE_SUMMARY_PROMPT = `Analyze the following code and create a practical, implementation-focused summary.
 
-Examine the content and determine whether it's primarily CODE or DOCUMENTATION:
-- CODE: Source files, scripts, API implementations, class definitions
-- DOCS: Tutorials, architecture overviews, configuration guides, API references
+Focus on the following developer needs:
+- Entry points and execution flow: Where should I start reading?
+- Key functions and classes: What does each main component actually do?
+- Data structures and state management: How is data transformed and stored?
+- Integration points: How does this connect with other systems or libraries?
+- Error handling: How are exceptions and edge cases handled?
+- Configuration: What can be customized and how?
+- Performance implications: Are there bottlenecks or optimization opportunities?
+- Dependencies: What external libraries or services are required?
+- Testing approach: How can this code be properly tested?
+- Security considerations: Are there potential vulnerabilities or authentication requirements?
 
-For CODE content:
-- Focus on implementation patterns, reusable components, and error-handling approaches that save time
-- Flag complex logic blocks that would benefit from additional documentation
-- Identify optimization opportunities in the implementation
-- Scrutinize for potential bugs, performance bottlenecks, security issues, or maintainability problems
-- Look for code smells, tight coupling, or overly complex implementations that could be refactored
+Look for:
+- Unclear or complex logic that needs explanation
+- Undocumented assumptions or requirements
+- Subtle bugs or edge cases
+- Advanced patterns that might be unfamiliar
 
-For DOCS content:
-- Focus on workflows, configuration shortcuts, and best practices that prevent common pitfalls
-- Identify any missing information that would help developers implement more effectively
-- Highlight areas where documentation could be expanded for clarity
-- Identify outdated information, contradictions, or unclear explanations
-- Flag sections where examples are missing, incomplete, or don't follow best practices
+For project managers, highlight:
+- Maintenance challenges and technical debt
+- Areas where documentation is missing
+- Components that might be difficult to extend
 
-Your goal is to create a summary that would save a developer hours of reading time while preserving all essential information for successful implementation.`;
+Format your response according to the structured sections in the system prompt.
 
-// Optimized meta-summarization prompt
-const META_SUMMARY_PROMPT = `Synthesize these section summaries into a unified technical summary that maximizes business value and developer productivity.
+For example, if given this Express.js route handler:
+
+\`\`\`javascript
+app.post('/api/users', async (req, res) => {
+  try {
+    const { username, email, password } = req.body;
+    
+    // Validate input
+    if (!username || !email || !password) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+    
+    // Check if user already exists
+    const existingUser = await User.findOne({ email });
+    if (existingUser) {
+      return res.status(409).json({ error: 'User already exists' });
+    }
+    
+    // Hash password
+    const salt = await bcrypt.genSalt(10);
+    const hashedPassword = await bcrypt.hash(password, salt);
+    
+    // Create user
+    const user = new User({
+      username,
+      email,
+      password: hashedPassword
+    });
+    
+    await user.save();
+    
+    // Generate JWT
+    const token = jwt.sign(
+      { id: user._id },
+      process.env.JWT_SECRET,
+      { expiresIn: '1h' }
+    );
+    
+    res.status(201).json({
+      message: 'User created successfully',
+      token
+    });
+  } catch (err) {
+    console.error('Error creating user:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+\`\`\`
+
+Your response should look like:
+
+\`\`\`
+## TL;DR
+This is an Express.js route handler for user registration that validates inputs, checks for duplicate users, securely stores passwords, and returns a JWT authentication token upon successful creation.
+
+## Core Components
+- **Route handler**: POST endpoint at '/api/users' for user registration
+- **Input validation**: Simple check for required fields
+- **User model**: MongoDB schema with username, email, and password fields
+- **Password security**: Uses bcrypt for password hashing
+- **Authentication**: JWT token generation upon successful registration
+
+## Implementation Guide
+1. Ensure MongoDB connection is established
+2. Configure JWT_SECRET in environment variables
+3. Import required dependencies: Express, User model, bcrypt, jwt
+4. Add this route handler to your Express app
+5. Connect to authentication middleware for protected routes
+
+## Dependencies & Prerequisites
+- Express.js
+- MongoDB with mongoose
+- bcrypt for password hashing
+- jsonwebtoken for JWT generation
+- Environment variable for JWT_SECRET
+
+## Key Design Patterns & Architecture
+- MVC pattern: Controller logic separated from User model
+- REST API design for user creation
+- Stateless authentication using JWT
+
+## Gotchas & Edge Cases
+- No email format validation implemented
+- No password strength requirements
+- Duplicate users only checked by email, not username
+- Error handling captures all errors with generic 500 response
+
+## Debugging & Troubleshooting
+- JWT issues: Check environment variable is properly set
+- User creation failures: Check MongoDB connection and indexes
+- 409 errors indicate duplicate email addresses
+- Console logs errors but with minimal details
+
+## Performance Considerations
+- Password hashing is CPU-intensive; bcrypt salt rounds affect performance
+- No rate limiting implemented for registration attempts
+- JWT generation is relatively lightweight
+\`\`\`
+`;
+
+// Specialized prompt for documentation
+const DOCS_SUMMARY_PROMPT = `Review the following technical documentation and create a practical implementation guide.
+
+Focus on the following:
+- Prerequisites and setup: What do I need to have installed or configured first?
+- Essential concepts: What core ideas must I understand before using this?
+- Step-by-step implementation: What are the exact steps to implement this technology?
+- Configuration options: What settings can be customized?
+- Authentication and security: How do I handle access control?
+- API usage patterns: What are the common request/response patterns?
+- Error handling: How should errors be managed?
+- Resource requirements: What are the hardware/software requirements?
+- Limitations: What are the known constraints or limitations?
+- Best practices: What approaches are recommended by experts?
+
+Look for:
+- Missing steps or assumptions in guides
+- Outdated information or deprecated features
+- Undocumented features or "hidden" functionality
+- Practical examples that demonstrate actual usage
+- Inconsistencies or contradictions
+
+For project managers, highlight:
+- Integration complexity and dependencies
+- Potential implementation challenges
+- Timeline considerations for implementation
+- Maintenance and operational considerations
+
+Format your response according to the structured sections in the system prompt.
+
+For example, if given this authentication documentation:
+
+\`\`\`markdown
+# Authentication API Guide
+
+Our authentication service allows you to implement secure login and registration for your applications.
+
+## Getting Started
+
+To begin using the Authentication API, you'll need to:
+1. Sign up for an API key at https://api.example.com/signup
+2. Install our client library with npm: \`npm install @example/auth-client\`
+
+## API Methods
+
+### Register User
+\`\`\`js
+auth.register({
+  email: "user@example.com",
+  password: "securePassword123",
+  name: "John Doe"
+})
+\`\`\`
+
+Returns a user object and session token on success.
+
+### Login User
+\`\`\`js
+auth.login({
+  email: "user@example.com",
+  password: "securePassword123"
+})
+\`\`\`
+
+Returns a session token that expires after 24 hours.
+
+### Verify Token
+\`\`\`js
+auth.verify(token)
+\`\`\`
+
+Returns user information if the token is valid.
+
+## Security Considerations
+
+- All API calls should be made over HTTPS
+- Tokens should be stored securely and not exposed to client-side JavaScript
+- Implement CSRF protection for production applications
+\`\`\`
+
+Your response should look like:
+
+\`\`\`
+## TL;DR
+A simple authentication API that provides user registration, login, and token verification through a JavaScript client library, requiring minimal setup but needing additional security measures for production use.
+
+## Core Components
+- **Auth Client Library**: JavaScript wrapper for authentication endpoints
+- **Registration**: Creates new user accounts and returns session tokens
+- **Login**: Authenticates existing users and generates tokens
+- **Token Verification**: Validates tokens and retrieves user information
+
+## Implementation Guide
+1. Sign up at https://api.example.com/signup to get your API key
+2. Install the client library: \`npm install @example/auth-client\`
+3. Initialize the client with your API key (not shown in docs)
+4. Implement registration form and call \`auth.register()\` with user details
+5. Implement login form and call \`auth.login()\` with credentials
+6. Store returned token securely (HTTP-only cookies recommended)
+7. Use \`auth.verify(token)\` to validate user sessions
+
+## Dependencies & Prerequisites
+- Node.js environment
+- npm package manager
+- HTTPS-enabled server for production
+- API key from the service
+
+## Key Design Patterns & Architecture
+- REST API with token-based authentication
+- Stateless authentication model
+- Client-side library abstracts API calls
+
+## Gotchas & Edge Cases
+- No mention of token refresh mechanism for expired tokens
+- No details on password requirements or validation
+- Missing error handling examples
+- No information on rate limiting or account lockouts
+- Unclear if the API key should be included in requests or just for initialization
+
+## Debugging & Troubleshooting
+- No troubleshooting section included in documentation
+- No error codes or common issues documented
+- No logging recommendations provided
+
+## Performance Considerations
+- Session tokens expire after 24 hours requiring re-login
+- No information on API rate limits or quotas
+- No caching strategy mentioned for token verification
+\`\`\`
+`;
+
+// Optimized general summarization prompt
+const SUMMARY_PROMPT = `Analyze the following technical content and create a practical summary optimized for developers who need to implement or use this technology quickly.
+
+First, determine if this is primarily CODE or DOCUMENTATION:
+- If CODE: ${CODE_SUMMARY_PROMPT}
+- If DOCUMENTATION: ${DOCS_SUMMARY_PROMPT}
+
+Your goal is to save developers time by extracting actionable insights and implementation details.`;
+
+// Meta-summarization prompt
+const META_SUMMARY_PROMPT = `Synthesize these section summaries into a unified technical summary that prioritizes developer implementation needs.
 
 Guidelines:
-1. Consolidate repetitive concepts across sections
-2. Highlight workflows that reduce implementation time 
-3. Identify patterns that can be reused across projects
-4. Quantify potential time savings using these reference benchmarks:
-   - Simple implementation: 2-4 hours saved
-   - Medium complexity: 1-2 days saved
-   - Architectural impact: Weeks saved
-5. Emphasize scalable approaches that work across team boundaries
-6. Flag any efficiency bottlenecks or areas for optimization
-7. Structure information to minimize cognitive load for new developers
-8. Consolidate problem areas to highlight systemic issues or recurring challenges
+1. Create a "## TL;DR" section that captures the most important aspects in 2-3 sentences
+2. Consolidate all important implementation steps into a clear workflow
+3. Combine related concepts and components from different sections
+4. Highlight dependencies and prerequisites upfront
+5. Organize gotchas and debugging info by component/feature 
+6. Maintain code examples that demonstrate key functionality
+7. Include a "Developer Workflow" section showing the typical development sequence
+8. Preserve important warnings and limitations
+9. If sections conflict, note the discrepancy and suggest the most reliable approach
 
-Examine the content and determine whether it's primarily CODE or DOCUMENTATION:
-- For CODE: Emphasize architectural patterns that promote maintainability and team collaboration
-- For DOCS: Highlight onboarding shortcuts and knowledge-sharing approaches
+For multiple sections that describe the same system:
+- Merge complementary information
+- Reconcile contradictory information by indicating what appears most current
+- Organize information by feature/component rather than by source document
 
-Prioritize insights that:
-1. Enable cross-team collaboration
-2. Reduce onboarding time for new developers
-3. Prevent production incidents
-4. Optimize cloud resource usage
-5. Address technical debt or recurring pain points
+Below are summaries of different sections of the content. Create a cohesive, unified summary that a developer could use for implementation.
 
-Below are summaries of different sections. Create a cohesive summary that maximizes knowledge transfer efficiency.`;
+For example, if given these section summaries:
+
+Section 1:
+\`\`\`
+## TL;DR
+The API client provides authentication and user management features through a RESTful interface.
+
+## Core Components
+- Authentication module with login/logout
+- User management for CRUD operations
+- Role-based access control
+\`\`\`
+
+Section 2:
+\`\`\`
+## TL;DR
+Server-side configuration and deployment options for the authentication system.
+
+## Implementation Guide
+1. Install dependencies
+2. Configure database connection
+3. Set up environment variables
+\`\`\`
+
+Your consolidated response should look like:
+
+\`\`\`
+## TL;DR
+A complete authentication system with both client and server components providing user management, role-based access, and RESTful APIs requiring proper database setup and environment configuration.
+
+## Core Components
+- **Authentication Module**: Handles login/logout operations through RESTful APIs
+- **User Management**: CRUD operations for user accounts
+- **Access Control**: Role-based permissions system
+- **Server Configuration**: Database connection and environment settings
+
+## Implementation Guide
+1. **Setup & Prerequisites**:
+   - Install dependencies
+   - Configure database connection
+   - Set up environment variables
+
+2. **Developer Workflow**:
+   - Configure server authentication settings
+   - Implement client-side authentication calls
+   - Add user management features
+   - Implement role-based access control
+
+## Dependencies & Prerequisites
+- Database system (details from both sections)
+- Server environment requirements
+- Client library dependencies
+
+(Additional consolidated sections following the same pattern...)
+\`\`\`
+`;
 
 // Helper functions
 /**
@@ -229,6 +525,7 @@ function chunkText(text, maxChunkSize = MAX_CHUNK_SIZE) {
 async function processChunk(text, chunkIndex) {
   const maxRetries = 3;
   let retryCount = 0;
+  // Use Claude 3.5 Haiku for speed
   const model = 'claude-3-5-haiku-latest';
   
   // Log start of chunk processing with timing
@@ -294,8 +591,8 @@ async function createMetaSummary(summaries, originalChunkCount) {
   );
   
   const combinedSummaries = numberedSummaries.join("\n\n---\n\n");
-  // Always use Sonnet for meta-summaries to ensure best quality
-  const model = 'claude-3-5-sonnet-20240620';
+  // Use Haiku for faster meta-summaries
+  const model = 'claude-3-5-haiku-latest';
   
   console.log(`Creating meta-summary from ${summaries.length} chunks (original content had ${originalChunkCount} chunks)`);
   console.log(`Using model: ${model} for meta-summary generation`);
@@ -372,6 +669,20 @@ app.post('/api/summarize', async (req, res) => {
   try {
     const startTime = Date.now();
     
+    // Stream initial response to client - improves perceived performance
+    res.writeHead(200, {
+      'Content-Type': 'application/json',
+      'Transfer-Encoding': 'chunked',
+      'X-Content-Type-Options': 'nosniff'
+    });
+    
+    // Send processing started message
+    res.write(JSON.stringify({ 
+      status: 'processing',
+      message: 'Processing started',
+      timestamp: Date.now()
+    }) + '\n');
+    
     // Determine processing strategy based on content size
     if (text.length <= 10000) {
       // For small content, process directly
@@ -381,29 +692,56 @@ app.post('/api/summarize', async (req, res) => {
       const totalTime = Date.now() - startTime;
       console.log(`Completed small content summarization in ${totalTime}ms`);
       
-      return res.json({
+      // Send final result
+      res.end(JSON.stringify({
         summary: result.summary,
         model: result.model,
         processingTime: `${totalTime}ms`
-      });
+      }));
+      return;
     }
     
     // For larger content, use chunking
     console.log(`Large content detected (${text.length} chars). Using chunk-based processing.`);
     console.log('Chunking text...');
     const chunkStartTime = Date.now();
-    const chunks = chunkText(text);
+    const chunks = chunkText(text, MAX_CHUNK_SIZE);
     console.log(`Chunking completed in ${Date.now() - chunkStartTime}ms. Split into ${chunks.length} chunks.`);
 
-    // Process chunks sequentially to avoid rate limits
-    console.log(`Processing ${chunks.length} chunks sequentially`);
-    const summaries = [];
+    // Process chunks with limited parallelism
+    console.log(`Processing ${chunks.length} chunks with parallelism of ${MAX_PARALLEL_CHUNKS}`);
+    const summaries = new Array(chunks.length).fill(null);
     const processStartTime = Date.now();
     
-    for (let i = 0; i < chunks.length; i++) {
-      console.log(`Processing chunk ${i + 1}/${chunks.length}`);
-      const result = await processChunk(chunks[i], i);
-      summaries.push(result.summary);
+    // Process chunks in batches to limit parallelism
+    for (let i = 0; i < chunks.length; i += MAX_PARALLEL_CHUNKS) {
+      const batch = [];
+      
+      // Create batch of promises for parallel processing
+      for (let j = 0; j < MAX_PARALLEL_CHUNKS && i + j < chunks.length; j++) {
+        const chunkIndex = i + j;
+        batch.push(
+          processChunk(chunks[chunkIndex], chunkIndex)
+            .then(result => {
+              summaries[chunkIndex] = result.summary;
+              
+              // Send progress update to client
+              const progress = {
+                status: 'chunk_complete',
+                chunkIndex: chunkIndex,
+                totalChunks: chunks.length,
+                progress: Math.round(((chunkIndex + 1) / chunks.length) * 100),
+                timestamp: Date.now()
+              };
+              
+              res.write(JSON.stringify(progress) + '\n');
+              return result;
+            })
+        );
+      }
+      
+      // Wait for current batch to complete before starting next batch
+      await Promise.all(batch);
     }
     
     console.log(`Chunk processing completed in ${Date.now() - processStartTime}ms`);
@@ -413,13 +751,14 @@ app.post('/api/summarize', async (req, res) => {
       const totalTime = Date.now() - startTime;
       console.log(`Single chunk summary completed in ${totalTime}ms`);
       
-      return res.json({
+      res.end(JSON.stringify({
         summary: summaries[0],
         chunkCount: chunks.length,
         processedChunks: 1,
-        model: 'claude-3-5-sonnet-20240620',
+        model: 'claude-3-5-haiku-latest',
         processingTime: `${totalTime}ms`
-      });
+      }));
+      return;
     }
     
     // For multiple chunks, create a meta-summary
@@ -431,13 +770,14 @@ app.post('/api/summarize', async (req, res) => {
     const totalTime = Date.now() - startTime;
     console.log(`Complete summarization process finished in ${totalTime}ms`);
     
-    return res.json({
+    // Send final result
+    res.end(JSON.stringify({
       summary: metaSummary.summary,
       chunkCount: chunks.length,
       processedChunks: chunks.length,
       model: metaSummary.model,
       processingTime: `${totalTime}ms`
-    });
+    }));
   } catch (error) {
     console.error('Error during summarization:', error);
     
@@ -445,23 +785,25 @@ app.post('/api/summarize', async (req, res) => {
     if (error.status === 429) {
       const retryAfter = error.headers?.get('retry-after') || 60;
       console.error(`Rate limit exceeded. Retry after: ${retryAfter}s`);
-      return res.status(429).json({ 
+      res.end(JSON.stringify({ 
         error: `Rate limit exceeded. Please try again later.`, 
         retryAfter
-      });
+      }));
+      return;
     }
     
     if (error.status === 503) {
       console.error('AI service overloaded');
-      return res.status(503).json({ 
+      res.end(JSON.stringify({ 
         error: `The AI service is currently overloaded. Please try again later.`, 
         isOverloaded: true 
-      });
+      }));
+      return;
     }
     
-    return res.status(500).json({ 
+    res.end(JSON.stringify({ 
       error: `Summarization failed: ${error.message}`
-    });
+    }));
   }
 });
 
