@@ -8,6 +8,9 @@ interface Message {
   type: 'user' | 'assistant';
   content: string;
   contentType?: 'code' | 'documentation';
+  chunkIndex?: number;
+  totalChunks?: number;
+  mode?: 'dev' | 'pm';
 }
 
 export default function Home() {
@@ -31,6 +34,8 @@ export default function Home() {
     stage?: 'splitting' | 'processing' | 'finalizing';
     overallProgress?: number; // 0-100 overall progress including all stages
   } | null>(null);
+  const [chunkSummaries, setChunkSummaries] = useState<Map<number, string>>(new Map());
+  const [viewMode, setViewMode] = useState<'dev' | 'pm'>('dev');
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -116,7 +121,10 @@ export default function Home() {
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ text: userMessage.content }),
+        body: JSON.stringify({ 
+          text: userMessage.content,
+          mode: viewMode
+        }),
       });
       
       if (!sessionResponse.ok) {
@@ -327,6 +335,44 @@ export default function Home() {
         setMessages(prev => prev.filter(msg => msg.id !== placeholderId));
         eventSource.close();
       };
+
+      // Handle chunk summaries
+      eventSource.addEventListener('chunk', (event: MessageEvent) => {
+        const data = JSON.parse(event.data);
+        console.log('Chunk summary received:', data);
+        
+        // Update chunk summaries map
+        setChunkSummaries(prev => {
+          const newMap = new Map(prev);
+          newMap.set(data.chunkIndex, data.summary);
+          return newMap;
+        });
+        
+        // Create or update message for this chunk
+        const chunkMessage: Message = {
+          id: `chunk-${data.chunkIndex}`,
+          type: 'assistant',
+          content: data.summary,
+          chunkIndex: data.chunkIndex,
+          totalChunks: data.totalChunks,
+          mode: data.mode || viewMode
+        };
+        
+        setMessages(prev => {
+          // Remove any existing message for this chunk
+          const filtered = prev.filter(msg => msg.id !== `chunk-${data.chunkIndex}`);
+          // Add the new chunk message
+          return [...filtered, chunkMessage];
+        });
+      });
+      
+      // Handle completion event
+      eventSource.addEventListener('complete', (event: MessageEvent) => {
+        const data = JSON.parse(event.data);
+        console.log('Processing completed:', data);
+        setLoading(false);
+        setProcessingProgress(null);
+      });
     } catch (err) {
       console.error('Exception in EventSource setup:', err);
       setError(err instanceof Error ? err.message : 'An error occurred');
@@ -388,6 +434,23 @@ export default function Home() {
                     <div className="whitespace-pre-wrap overflow-auto max-h-[70vh]">{message.content}</div>
                   ) : (
                     <div className="markdown-content overflow-auto max-h-[70vh]">
+                      <div className="flex items-center mb-2">
+                        {message.chunkIndex ? (
+                          <div className="text-sm text-gray-400 mr-2">
+                            Chunk {message.chunkIndex} of {message.totalChunks}
+                          </div>
+                        ) : null}
+                        
+                        {message.mode && (
+                          <div className={`text-xs font-medium px-2 py-0.5 rounded-full ${
+                            message.mode === 'dev' 
+                              ? 'bg-blue-900/50 text-blue-300' 
+                              : 'bg-purple-900/50 text-purple-300'
+                          }`}>
+                            {message.mode === 'dev' ? 'Developer' : 'Project Manager'}
+                          </div>
+                        )}
+                      </div>
                       <ReactMarkdown>{message.content}</ReactMarkdown>
                     </div>
                   )}
@@ -457,61 +520,89 @@ export default function Home() {
 
           {/* Floating input bar */}
           <div className="fixed bottom-0 left-0 right-0 bg-gradient-to-t from-[#0f1729] via-[#0f1729] to-transparent py-6 px-4">
-            <form 
-              onSubmit={handleSubmit} 
-              className="max-w-5xl mx-auto w-[80%] relative shadow-lg"
-            >
-              <div className="relative">
-                <textarea
-                  ref={inputRef}
-                  value={text}
-                  onChange={(e) => {
-                    const newText = e.target.value;
-                    // Apply hard limit of 100,000 characters
-                    if (newText.length > 100000) {
-                      setText(newText.substring(0, 100000));
-                      setTextTruncated(true);
-                    } else {
-                      setText(newText);
-                      setTextTruncated(false);
-                    }
-                  }}
-                  onKeyDown={handleKeyDown}
-                  className="w-full p-4 pr-14 chat-input text-gray-200 focus:outline-none resize-none overflow-hidden"
-                  placeholder="Enter code, documentation, or any technical content to summarize..."
-                  rows={1}
-                  maxLength={100000}
-                  disabled={loading}
-                />
-                <button
-                  type="submit"
-                  disabled={loading || !text.trim()}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 p-2 text-gray-300 hover:text-white focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed transition-colors rounded-full hover:bg-[#2d3752]"
-                  aria-label="Send message"
-                >
-                  {loading ? (
-                    <svg className="animate-spin h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                    </svg>
-                  ) : (
-                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-6 h-6">
-                      <path d="M3.478 2.404a.75.75 0 0 0-.926.941l2.432 7.905H13.5a.75.75 0 0 1 0 1.5H4.984l-2.432 7.905a.75.75 0 0 0 .926.94 60.519 60.519 0 0 0 18.445-8.986.75.75 0 0 0 0-1.218A60.517 60.517 0 0 0 3.478 2.404Z" />
-                    </svg>
-                  )}
-                </button>
+            <div className="max-w-5xl mx-auto w-full mb-4">
+              {/* Mode toggle */}
+              <div className="flex justify-center mb-3">
+                <div className="glass-card p-1 rounded-full flex items-center">
+                  <button
+                    onClick={() => setViewMode('dev')}
+                    className={`px-4 py-1.5 rounded-full text-sm font-medium transition-all ${
+                      viewMode === 'dev' 
+                        ? 'bg-indigo-500 text-white' 
+                        : 'text-gray-300 hover:text-white'
+                    }`}
+                  >
+                    Developer
+                  </button>
+                  <button
+                    onClick={() => setViewMode('pm')}
+                    className={`px-4 py-1.5 rounded-full text-sm font-medium transition-all ${
+                      viewMode === 'pm' 
+                        ? 'bg-indigo-500 text-white' 
+                        : 'text-gray-300 hover:text-white'
+                    }`}
+                  >
+                    Project Manager
+                  </button>
+                </div>
               </div>
-              {text.length > 75000 && !textTruncated && (
-                <div className="text-amber-400 text-xs mt-1 px-2">
-                  Large text detected ({text.length.toLocaleString()} characters). Consider breaking into smaller parts for better results.
+            
+              <form 
+                onSubmit={handleSubmit} 
+                className="relative shadow-lg"
+              >
+                <div className="relative">
+                  <textarea
+                    ref={inputRef}
+                    value={text}
+                    onChange={(e) => {
+                      const newText = e.target.value;
+                      // Apply hard limit of 100,000 characters
+                      if (newText.length > 100000) {
+                        setText(newText.substring(0, 100000));
+                        setTextTruncated(true);
+                      } else {
+                        setText(newText);
+                        setTextTruncated(false);
+                      }
+                    }}
+                    onKeyDown={handleKeyDown}
+                    className="w-full p-4 pr-14 chat-input text-gray-200 focus:outline-none resize-none overflow-hidden"
+                    placeholder="Enter code, documentation, or any technical content to summarize..."
+                    rows={1}
+                    maxLength={100000}
+                    disabled={loading}
+                  />
+                  <button
+                    type="submit"
+                    disabled={loading || !text.trim()}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 p-2 text-gray-300 hover:text-white focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed transition-colors rounded-full hover:bg-[#2d3752]"
+                    aria-label="Send message"
+                  >
+                    {loading ? (
+                      <svg className="animate-spin h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                      </svg>
+                    ) : (
+                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-6 h-6">
+                        <path d="M3.478 2.404a.75.75 0 0 0-.926.941l2.432 7.905H13.5a.75.75 0 0 1 0 1.5H4.984l-2.432 7.905a.75.75 0 0 0 .926.94 60.519 60.519 0 0 0 18.445-8.986.75.75 0 0 0 0-1.218A60.517 60.517 0 0 0 3.478 2.404Z" />
+                      </svg>
+                    )}
+                  </button>
                 </div>
-              )}
-              {textTruncated && (
-                <div className="text-red-400 text-xs mt-1 px-2 font-medium">
-                  Text has been truncated to 100,000 characters. The remaining text was removed.
-                </div>
-              )}
-            </form>
+                {text.length > 75000 && !textTruncated && (
+                  <div className="text-amber-400 text-xs mt-1 px-2">
+                    Large text detected ({text.length.toLocaleString()} characters). Consider breaking into smaller parts for better results.
+                  </div>
+                )}
+                {textTruncated && (
+                  <div className="text-red-400 text-xs mt-1 px-2 font-medium">
+                    Text has been truncated to 100,000 characters. The remaining text was removed.
+                  </div>
+                )}
+              </form>
+            </div>
             <div className="text-center mt-4 text-gray-500 text-xs">
               &copy; {new Date().getFullYear()} Summify - AI-powered summarization tool
             </div>
