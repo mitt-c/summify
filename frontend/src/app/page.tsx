@@ -11,7 +11,14 @@ interface Message {
   chunkIndex?: number;
   totalChunks?: number;
   mode?: 'dev' | 'pm';
+  timestamp?: number; // Add timestamp for sorting
 }
+
+// Storage key for localStorage
+const STORAGE_KEY = 'summify_conversation_history';
+
+// Maximum number of conversations to store
+const MAX_STORED_CONVERSATIONS = 10;
 
 export default function Home() {
   const [text, setText] = useState('');
@@ -36,9 +43,103 @@ export default function Home() {
   } | null>(null);
   const [chunkSummaries, setChunkSummaries] = useState<Map<number, string>>(new Map());
   const [viewMode, setViewMode] = useState<'dev' | 'pm'>('dev');
+  const [hasLoadedHistory, setHasLoadedHistory] = useState(false);
+  const [conversationId, setConversationId] = useState<string>('');
+  const [showConversationMenu, setShowConversationMenu] = useState(false);
+  const [storedConversations, setStoredConversations] = useState<any[]>([]);
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  // Initialize conversationId on the client-side only
+  useEffect(() => {
+    // Set initial conversation ID
+    setConversationId(`conv-${Date.now()}`);
+  }, []);
+
+  // Load conversation history from localStorage on initial render
+  useEffect(() => {
+    if (!hasLoadedHistory) {
+      try {
+        // Get conversation ID from URL if present
+        const urlParams = new URLSearchParams(window.location.search);
+        const urlConvId = urlParams.get('conversation');
+        
+        if (urlConvId) {
+          setConversationId(urlConvId);
+          
+          // Load specific conversation
+          const savedConversationsString = localStorage.getItem(STORAGE_KEY);
+          if (savedConversationsString) {
+            const savedConversations = JSON.parse(savedConversationsString);
+            const targetConversation = savedConversations.find(
+              (conv: {id: string, messages: Message[]}) => conv.id === urlConvId
+            );
+            
+            if (targetConversation) {
+              setMessages(targetConversation.messages);
+              console.log(`Loaded conversation: ${urlConvId} with ${targetConversation.messages.length} messages`);
+            }
+          }
+        } else {
+          // Generate a new conversation ID
+          const newConvId = `conv-${Date.now()}`;
+          setConversationId(newConvId);
+          
+          // Update URL with the conversation ID
+          const newUrl = `${window.location.pathname}?conversation=${newConvId}`;
+          window.history.pushState({ path: newUrl }, '', newUrl);
+        }
+        
+        setHasLoadedHistory(true);
+      } catch (error) {
+        console.error('Failed to load conversation history:', error);
+        setHasLoadedHistory(true);
+      }
+    }
+  }, [hasLoadedHistory]);
+
+  // Save conversation to localStorage whenever messages change
+  useEffect(() => {
+    if (hasLoadedHistory && messages.length > 1) { // Don't save if it's just the welcome message
+      try {
+        // Get existing conversations
+        const savedConversationsString = localStorage.getItem(STORAGE_KEY);
+        let savedConversations = savedConversationsString 
+          ? JSON.parse(savedConversationsString) 
+          : [];
+        
+        // Find if current conversation exists
+        const existingConvIndex = savedConversations.findIndex(
+          (conv: {id: string}) => conv.id === conversationId
+        );
+        
+        if (existingConvIndex >= 0) {
+          // Update existing conversation
+          savedConversations[existingConvIndex].messages = messages;
+          savedConversations[existingConvIndex].lastUpdated = Date.now();
+        } else {
+          // Add new conversation
+          savedConversations.push({
+            id: conversationId,
+            messages,
+            lastUpdated: Date.now()
+          });
+        }
+        
+        // Sort by last updated
+        savedConversations.sort((a: any, b: any) => b.lastUpdated - a.lastUpdated);
+        
+        // Keep only the latest MAX_STORED_CONVERSATIONS
+        savedConversations = savedConversations.slice(0, MAX_STORED_CONVERSATIONS);
+        
+        // Save back to localStorage
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(savedConversations));
+      } catch (error) {
+        console.error('Failed to save conversation history:', error);
+      }
+    }
+  }, [messages, conversationId, hasLoadedHistory]);
 
   // Auto-scroll to bottom when messages change
   useEffect(() => {
@@ -59,6 +160,25 @@ export default function Home() {
       textarea.style.overflowY = newHeight >= 200 ? 'auto' : 'hidden';
     }
   }, [text]);
+
+  // Start a new conversation
+  const startNewConversation = () => {
+    const newConvId = `conv-${Date.now()}`;
+    setConversationId(newConvId);
+    
+    // Update URL with the new conversation ID
+    const newUrl = `${window.location.pathname}?conversation=${newConvId}`;
+    window.history.pushState({ path: newUrl }, '', newUrl);
+    
+    // Reset messages to just the welcome message
+    setMessages([
+      {
+        id: 'welcome',
+        type: 'assistant',
+        content: 'Welcome to Summify! 👋\n\nPaste any code, documentation, or technical content, and I\'ll provide you with a concise summary. You can send large files or snippets, and I\'ll handle the processing automatically.'
+      }
+    ]);
+  };
 
   // Reset textarea after submission
   const resetTextarea = () => {
@@ -84,7 +204,8 @@ export default function Home() {
     const userMessage: Message = {
       id: Date.now().toString(),
       type: 'user',
-      content: text.trim()
+      content: text.trim(),
+      timestamp: Date.now()
     };
     
     setMessages(prev => [...prev, userMessage]);
@@ -106,6 +227,7 @@ export default function Home() {
       id: placeholderId,
       type: 'assistant',
       content: 'Processing your content...',
+      timestamp: Date.now()
     };
     
     setMessages(prev => [...prev, placeholderMessage]);
@@ -272,7 +394,8 @@ export default function Home() {
           id: (Date.now() + 1).toString(),
           type: 'assistant',
           content: summary,
-          contentType: finalData.contentType
+          contentType: finalData.contentType,
+          timestamp: Date.now()
         };
         
         // Replace placeholder with actual response
@@ -355,12 +478,16 @@ export default function Home() {
           content: data.summary,
           chunkIndex: data.chunkIndex,
           totalChunks: data.totalChunks,
-          mode: data.mode || viewMode
+          mode: data.mode || viewMode,
+          timestamp: Date.now()
         };
         
         setMessages(prev => {
-          // Remove any existing message for this chunk
-          const filtered = prev.filter(msg => msg.id !== `chunk-${data.chunkIndex}`);
+          // Remove any existing message for this chunk and the placeholder message
+          const filtered = prev.filter(msg => 
+            msg.id !== `chunk-${data.chunkIndex}` && 
+            msg.id !== placeholderId
+          );
           // Add the new chunk message
           return [...filtered, chunkMessage];
         });
@@ -391,6 +518,47 @@ export default function Home() {
     }
   };
 
+  // Load a specific conversation
+  const loadConversation = (convId: string) => {
+    try {
+      const savedConversationsString = localStorage.getItem(STORAGE_KEY);
+      if (savedConversationsString) {
+        const savedConversations = JSON.parse(savedConversationsString);
+        const targetConversation = savedConversations.find(
+          (conv: {id: string, messages: Message[]}) => conv.id === convId
+        );
+        
+        if (targetConversation) {
+          setConversationId(convId);
+          setMessages(targetConversation.messages);
+          
+          // Update URL
+          const newUrl = `${window.location.pathname}?conversation=${convId}`;
+          window.history.pushState({ path: newUrl }, '', newUrl);
+        }
+      }
+    } catch (error) {
+      console.error('Failed to load conversation:', error);
+    }
+  };
+
+  // Get stored conversations
+  const getStoredConversations = () => {
+    try {
+      const savedConversationsString = localStorage.getItem(STORAGE_KEY);
+      if (savedConversationsString) {
+        return JSON.parse(savedConversationsString);
+      }
+    } catch (error) {
+      console.error('Failed to get stored conversations:', error);
+    }
+    return [];
+  };
+
+  useEffect(() => {
+    setStoredConversations(getStoredConversations());
+  }, []);
+
   return (
     <div className="min-h-screen flex flex-col">
       <div className="flex flex-col flex-1 w-full mx-auto">
@@ -401,6 +569,83 @@ export default function Home() {
           <p className="text-gray-400 mt-1 text-sm">
             AI-powered documentation and code summarization
           </p>
+          
+          {/* Conversation history dropdown */}
+          <div className="mt-4 flex justify-center">
+            <div className="relative inline-block text-left">
+              <div>
+                <button 
+                  type="button" 
+                  className="inline-flex justify-center rounded-md border border-gray-700 px-4 py-1.5 bg-gray-800 text-sm font-medium text-gray-300 hover:bg-gray-700 transition-colors"
+                  id="menu-button" 
+                  aria-expanded="true" 
+                  aria-haspopup="true"
+                  onClick={() => setShowConversationMenu(!showConversationMenu)}
+                >
+                  Conversation History
+                  <svg className="-mr-1 ml-2 h-5 w-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                    <path fillRule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clipRule="evenodd" />
+                  </svg>
+                </button>
+              </div>
+              {showConversationMenu && (
+                <div 
+                  className="absolute right-0 mt-2 w-56 rounded-md shadow-lg bg-gray-800 ring-1 ring-black ring-opacity-5 z-10" 
+                  role="menu" 
+                  aria-orientation="vertical" 
+                  aria-labelledby="menu-button" 
+                  id="conversation-menu"
+                >
+                  <div className="py-1" role="none">
+                    <button
+                      className="text-gray-300 hover:bg-gray-700 hover:text-white block px-4 py-2 text-sm w-full text-left"
+                      onClick={() => {
+                        setShowConversationMenu(false);
+                        startNewConversation();
+                      }}
+                    >
+                      + New Conversation
+                    </button>
+                    <div className="border-t border-gray-700 my-1"></div>
+                    {storedConversations.length > 0 ? (
+                      storedConversations.map((conv: any) => {
+                        // Find the first user message for the title
+                        const firstUserMsg = conv.messages.find((m: Message) => m.type === 'user');
+                        const title = firstUserMsg 
+                          ? firstUserMsg.content.substring(0, 30) + (firstUserMsg.content.length > 30 ? '...' : '') 
+                          : 'Conversation';
+                        
+                        // Format date
+                        const date = new Date(conv.lastUpdated);
+                        const formattedDate = date.toLocaleDateString(undefined, {
+                          month: 'short',
+                          day: 'numeric',
+                          hour: '2-digit',
+                          minute: '2-digit'
+                        });
+                        
+                        return (
+                          <button
+                            key={conv.id}
+                            className={`${conv.id === conversationId ? 'bg-gray-700 text-white' : 'text-gray-300'} hover:bg-gray-700 hover:text-white block px-4 py-2 text-sm w-full text-left`}
+                            onClick={() => {
+                              setShowConversationMenu(false);
+                              loadConversation(conv.id);
+                            }}
+                          >
+                            <div className="font-medium truncate">{title}</div>
+                            <div className="text-xs text-gray-400">{formattedDate}</div>
+                          </button>
+                        );
+                      })
+                    ) : (
+                      <div className="text-gray-500 px-4 py-2 text-sm">No saved conversations</div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
         </header>
 
         <main className="flex-1 flex flex-col max-w-5xl mx-auto w-full">
