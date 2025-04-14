@@ -18,27 +18,25 @@ app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 // Configure CORS
 const allowedOrigins = (process.env.FRONTEND_URL || 'http://localhost:3000')
   .split(',')
-  .map(origin => origin.trim());
+  .map((origin) => origin.trim());
 
 app.use(
   cors({
     origin: (origin, callback) => {
-      // Debugging: check which origin is being used
       console.log(`CORS: Received request from origin: ${origin || 'none'}`);
-
       // Allow requests with no origin (mobile apps, etc.)
       if (!origin) {
         console.log('CORS: No origin provided; allowing request.');
-      return callback(null, true);
-    }
-    if (allowedOrigins.includes('*') || allowedOrigins.includes(origin)) {
+        return callback(null, true);
+      }
+      if (allowedOrigins.includes('*') || allowedOrigins.includes(origin)) {
         console.log(`CORS: Origin ${origin} is allowed.`);
         return callback(null, true);
       }
       console.warn(`CORS: Origin ${origin} not allowed.`);
       return callback(new Error('Not allowed by CORS'), false);
-  },
-  methods: ['GET', 'POST', 'OPTIONS'],
+    },
+    methods: ['GET', 'POST', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
   })
 );
@@ -52,7 +50,6 @@ const anthropic = new Anthropic({
 // Fixed chunk size: 16k tokens * 4 chars = ~64k characters
 // --------------------------------------
 const FIXED_CHUNK_SIZE = 16000 * 4; // 64,000 chars
-
 console.log(`Using a fixed chunk size of ${FIXED_CHUNK_SIZE} characters.`);
 
 // Basic rate limiter
@@ -64,30 +61,27 @@ class SimpleRateLimiter {
 
   canMakeRequest() {
     const now = Date.now();
-    // Filter out timestamps older than 1 minute
-    this.requestTimestamps = this.requestTimestamps.filter(
-      t => now - t < 60_000
-    );
+    // Remove timestamps older than 1 minute
+    this.requestTimestamps = this.requestTimestamps.filter((t) => now - t < 60000);
     return this.requestTimestamps.length < this.maxRequestsPerMinute;
   }
 
   async waitForSlot() {
     while (!this.canMakeRequest()) {
-      // Debugging: log each time we need to wait
       console.log('RateLimiter: At capacity, waiting 1 second...');
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      await new Promise((resolve) => setTimeout(resolve, 1000));
     }
     this.requestTimestamps.push(Date.now());
     console.log('RateLimiter: Slot acquired, proceeding.');
   }
 }
 
-// We allow 5 requests per minute to match Claude's 5 RPM limit.
+// We allow 5 requests per minute to match Claude's 5 RPM limit
 const rateLimiter = new SimpleRateLimiter(5);
 
-// Estimate tokens (still useful for debugging logs)
+// Estimate tokens (debugging)
 function estimateTokens(str) {
-  // 1 token ≈ 4 characters
+  // ~4 chars per token
   return Math.ceil(str.length / 4);
 }
 
@@ -97,20 +91,19 @@ function chunkText(text) {
     console.log(`No chunking needed. Text length: ${text.length} chars.`);
     return [text];
   }
-
   console.log(`Chunking needed. Text length: ${text.length} chars.`);
+
   const chunks = [];
   let startIndex = 0;
-
   while (startIndex < text.length) {
     let endIndex = Math.min(startIndex + FIXED_CHUNK_SIZE, text.length);
 
-    // Optional: try to find paragraph or line break near the end
+    // optional: try paragraph/sentence breaks
     if (endIndex < text.length) {
-      const nearEnd = endIndex - 500; // look 500 chars back
+      const nearEnd = endIndex - 500; 
       let breakPos = text.lastIndexOf('\n\n', endIndex);
       if (breakPos < startIndex || breakPos < nearEnd) {
-        // fallback: line break
+        // fallback: single line break
         breakPos = text.lastIndexOf('\n', endIndex);
         if (breakPos < startIndex || breakPos < endIndex - 300) {
           // fallback: sentence break
@@ -136,6 +129,9 @@ function chunkText(text) {
   return chunks;
 }
 
+// --------------------------------------
+// PROMPTS for Dev & PM
+// --------------------------------------
 // Define the different system prompts for DEV and PM modes
 const DEV_PROMPT = `You are a senior software engineer with expertise in code analysis and documentation review. Your task is to create a comprehensive, implementation-focused summary for another developer who needs to quickly understand and work with this codebase.
 
@@ -560,7 +556,7 @@ function generateSessionId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
 }
 
-// Modify create session endpoint to store the mode
+// 1) create-session endpoint
 app.post('/api/create-session', (req, res) => {
   const { text, mode } = req.body;
   if (!text) {
@@ -571,19 +567,23 @@ app.post('/api/create-session', (req, res) => {
   const sessionId = generateSessionId();
   sessions.set(sessionId, {
     text,
-    mode: mode || 'dev', // Default to dev mode if not specified
+    mode: mode || 'dev',
     createdAt: Date.now(),
   });
 
-  console.log(`Created new session ${sessionId} with text length = ${text.length}, mode = ${mode || 'dev'}`);
+  console.log(
+    `Created new session ${sessionId} with text length = ${text.length}, mode = ${
+      mode || 'dev'
+    }`
+  );
   return res.status(200).json({
     sessionId,
     textLength: text.length,
-    mode: mode || 'dev'
+    mode: mode || 'dev',
   });
 });
 
-// Update summarizeChunk function to use the appropriate prompt
+// Summarize a single chunk
 async function summarizeChunk(text, chunkIndex, totalChunks, mode = 'dev') {
   console.log(
     `Summarizing chunk ${chunkIndex + 1}/${totalChunks}, length: ${
@@ -592,10 +592,9 @@ async function summarizeChunk(text, chunkIndex, totalChunks, mode = 'dev') {
   );
 
   try {
-    // Enforce rate limit
+    // Rate limit
     await rateLimiter.waitForSlot();
 
-    // Choose the prompt based on mode
     const systemPrompt = mode === 'pm' ? PM_PROMPT : DEV_PROMPT;
 
     const response = await anthropic.messages.create({
@@ -611,7 +610,9 @@ async function summarizeChunk(text, chunkIndex, totalChunks, mode = 'dev') {
       ],
     });
 
-    console.log(`Chunk ${chunkIndex + 1}/${totalChunks} summarized successfully with ${mode} mode.`);
+    console.log(
+      `Chunk ${chunkIndex + 1}/${totalChunks} summarized successfully in ${mode} mode.`
+    );
 
     return {
       success: true,
@@ -623,7 +624,7 @@ async function summarizeChunk(text, chunkIndex, totalChunks, mode = 'dev') {
   }
 }
 
-// Update the SSE summarize-stream endpoint to use the stored mode
+// 2) SSE Summarize-stream
 app.get('/api/summarize-stream', async (req, res) => {
   const { sessionId } = req.query;
   if (!sessionId) {
@@ -637,7 +638,9 @@ app.get('/api/summarize-stream', async (req, res) => {
     return res.status(404).json({ error: 'Invalid or expired session.' });
   }
 
-  console.log(`summarize-stream: Received request for sessionId = ${sessionId}, mode = ${session.mode || 'dev'}`);
+  console.log(
+    `summarize-stream: Received request for sessionId = ${sessionId}, mode = ${session.mode}`
+  );
 
   // Setup SSE
   res.setHeader('Content-Type', 'text/event-stream');
@@ -648,7 +651,7 @@ app.get('/api/summarize-stream', async (req, res) => {
     res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
   }
 
-  // Heartbeat
+  // heartbeat to keep connection alive
   const heartbeat = setInterval(() => {
     sendEvent('heartbeat', { time: Date.now() });
   }, 30000);
@@ -657,33 +660,72 @@ app.get('/api/summarize-stream', async (req, res) => {
     console.log(`Client closed SSE connection for sessionId = ${sessionId}`);
     clearInterval(heartbeat);
   });
-  
+
   try {
-    sendEvent('processing', { status: 'started' });
-    console.log(`Starting summarization for session ${sessionId} with ${session.mode || 'dev'} mode...`);
+    // Immediately tell the client we've "started"
+    // The frontend listens for 'processing' and sets loading UI
+    sendEvent('processing', { status: 'started', message: 'Summarization started...' });
 
     const { text, mode = 'dev' } = session;
+    console.log(`Starting summarization for session ${sessionId} in ${mode} mode...`);
+
+    // chunk
     const chunks = chunkText(text);
 
-    // Inform the client
-    sendEvent('info', { chunkCount: chunks.length, mode });
-    console.log(`Session ${sessionId} has ${chunks.length} chunk(s), mode: ${mode}.`);
+    // Inform the client about chunking + short message
+    sendEvent('info', {
+      chunkCount: chunks.length,
+      mode,
+      message:
+        chunks.length === 1
+          ? 'Document fits in a single chunk. Summarizing now...'
+          : `Document split into ${chunks.length} chunks. Summarizing in parallel...`,
+    });
 
     if (chunks.length === 1) {
-      // Single chunk
-      console.log(`Single-chunk flow with ${mode} mode...`);
+      // Single-chunk flow
+      console.log('Single-chunk flow...');
+      // Optionally, send a “progress” event so the UI sees something
+      sendEvent('progress', {
+        progress: 10,
+        chunkIndex: 0,
+        totalChunks: 1,
+        message: 'Summarizing single chunk...',
+      });
+
       const result = await summarizeChunk(chunks[0], 0, 1, mode);
       if (result.success) {
-        sendEvent('chunk', { index: 1, total: 1, summary: result.summary, mode });
-        console.log(`Single-chunk summarization succeeded with ${mode} mode.`);
-    } else {
+        console.log(`Single-chunk summary length: ${result.summary.length}`);
+        // Emit chunk event
+        sendEvent('chunk', {
+          chunkIndex: 0,
+          totalChunks: 1,
+          summary: result.summary,
+          mode,
+        });
+
+        // Final result
+        sendEvent('result', {
+          summary: result.summary,
+          mode,
+        });
+        console.log('Single-chunk summarization succeeded.');
+      } else {
         sendEvent('error', { error: result.error });
-        console.error(`Single-chunk summarization failed with ${mode} mode:`, result.error);
+        console.error('Single-chunk summarization failed:', result.error);
       }
     } else {
-      // Multiple chunks in parallel
-      console.log(`Multi-chunk flow with ${chunks.length} chunks and ${mode} mode...`);
-      const promises = chunks.map((c, i) => summarizeChunk(c, i, chunks.length, mode));
+      // Multi-chunk flow
+      console.log(`Multi-chunk flow with ${chunks.length} chunks, mode = ${mode}...`);
+      // Optionally, send an initial progress event
+      sendEvent('progress', {
+        progress: 10,
+        chunkIndex: 0,
+        totalChunks: chunks.length,
+        message: `Summarizing ${chunks.length} chunks in parallel...`,
+      });
+
+      const promises = chunks.map((chunk, i) => summarizeChunk(chunk, i, chunks.length, mode));
       const results = await Promise.allSettled(promises);
 
       results.forEach((resItem, i) => {
@@ -692,51 +734,54 @@ app.get('/api/summarize-stream', async (req, res) => {
             index: i + 1,
             total: chunks.length,
             summary: resItem.value.summary,
-            mode
+            mode,
           });
         } else {
           const errMsg = resItem.reason?.message || resItem.value?.error || 'Unknown error';
-          console.error(`Chunk ${i + 1}/${chunks.length} summarization failed with ${mode} mode: ${errMsg}`);
+          console.error(`Chunk ${i + 1}/${chunks.length} summarization failed: ${errMsg}`);
           sendEvent('chunk', {
             index: i + 1,
             total: chunks.length,
-            summary: `[Error processing chunk]`,
+            summary: '[Error processing chunk]',
             error: errMsg,
-            mode
+            mode,
           });
         }
       });
-      console.log(`All ${chunks.length} chunks processed for sessionId = ${sessionId} with ${mode} mode.`);
+      console.log(
+        `All ${chunks.length} chunks processed for sessionId = ${sessionId} in ${mode} mode.`
+      );
     }
 
+    // final
     sendEvent('complete', { status: 'done', mode });
-    console.log(`Summarization complete for sessionId = ${sessionId} with ${mode} mode.`);
-    // Do not res.end() because SSE stays open
+    console.log(`Summarization complete for sessionId = ${sessionId}, mode = ${mode}.`);
+    // do not res.end() to keep SSE open
   } catch (error) {
-    console.error(`Summarization error with ${session.mode || 'dev'} mode:`, error);
+    console.error(`Summarization error in ${session.mode} mode:`, error);
     sendEvent('error', { error: error.message });
   }
 });
 
-// Simple /api/summarize redirect for compatibility
+// 3) Fallback /api/summarize
 app.get('/api/summarize', (req, res) => {
   const { userText } = req.query;
   if (!userText) {
     console.error('summarize: No userText provided');
     return res.status(400).json({ error: 'No text provided.' });
   }
-    
-    const text = decodeURIComponent(userText);
+
+  const text = decodeURIComponent(userText);
   const sessionId = generateSessionId();
   sessions.set(sessionId, { text, createdAt: Date.now() });
 
   console.log(`GET /api/summarize -> Created temp session ${sessionId} with length = ${text.length}`);
 
-  // 307 to preserve method for SSE
-    return res.redirect(307, `/api/summarize-stream?sessionId=${sessionId}`);
+  // 307 -> preserve method for SSE
+  return res.redirect(307, `/api/summarize-stream?sessionId=${sessionId}`);
 });
 
-// Periodic cleanup of old sessions
+// Clean up old sessions every 5 min
 setInterval(() => {
   const now = Date.now();
   for (const [id, sess] of sessions.entries()) {
@@ -747,7 +792,7 @@ setInterval(() => {
   }
 }, 5 * 60_000);
 
-// Start
+// Start server
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
   if (process.env.ANTHROPIC_API_KEY) {
@@ -756,3 +801,6 @@ app.listen(PORT, () => {
     console.warn('No Anthropic API key found! Summarization requests will fail.');
   }
 });
+
+
+

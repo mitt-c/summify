@@ -11,7 +11,7 @@ interface Message {
   chunkIndex?: number;
   totalChunks?: number;
   mode?: 'dev' | 'pm';
-  timestamp?: number; // Add timestamp for sorting
+  timestamp?: number;
 }
 
 // Storage key for localStorage
@@ -26,71 +26,72 @@ export default function Home() {
     {
       id: 'welcome',
       type: 'assistant',
-      content: 'Welcome to Summify! 👋\n\nPaste any code, documentation, or technical content, and I\'ll provide you with a concise summary. You can send large files or snippets, and I\'ll handle the processing automatically.'
-    }
+      content:
+        "Welcome to Summify! 👋\n\nPaste any code, documentation, or technical content, and I'll provide you with a concise summary. You can send large files or snippets, and I'll handle the processing automatically.",
+    },
   ]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [textTruncated, setTextTruncated] = useState(false);
+
+  // Tracks SSE chunk progress & messages
   const [processingProgress, setProcessingProgress] = useState<{
     status: string;
     progress: number;
     currentChunk: number;
     totalChunks: number;
     message?: string;
-    stage?: 'splitting' | 'processing' | 'finalizing';
-    overallProgress?: number; // 0-100 overall progress including all stages
+    stage?: 'splitting' | 'processing' | 'finalizing' | 'initial';
+    overallProgress?: number; // 0-100 overall progress
   } | null>(null);
+
   const [chunkSummaries, setChunkSummaries] = useState<Map<number, string>>(new Map());
   const [viewMode, setViewMode] = useState<'dev' | 'pm'>('dev');
   const [hasLoadedHistory, setHasLoadedHistory] = useState(false);
   const [conversationId, setConversationId] = useState<string>('');
   const [showConversationMenu, setShowConversationMenu] = useState(false);
   const [storedConversations, setStoredConversations] = useState<any[]>([]);
-  
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
-  // Initialize conversationId on the client-side only
+  // 1) Create initial conversation ID on mount
   useEffect(() => {
-    // Set initial conversation ID
     setConversationId(`conv-${Date.now()}`);
   }, []);
 
-  // Load conversation history from localStorage on initial render
+  // 2) Load conversation from localStorage (if any)
   useEffect(() => {
     if (!hasLoadedHistory) {
       try {
-        // Get conversation ID from URL if present
         const urlParams = new URLSearchParams(window.location.search);
         const urlConvId = urlParams.get('conversation');
-        
+
+        const savedConversationsString = localStorage.getItem(STORAGE_KEY);
+        const savedConversations = savedConversationsString
+          ? JSON.parse(savedConversationsString)
+          : [];
+
         if (urlConvId) {
+          // If URL param has a conversation
           setConversationId(urlConvId);
-          
-          // Load specific conversation
-          const savedConversationsString = localStorage.getItem(STORAGE_KEY);
-          if (savedConversationsString) {
-            const savedConversations = JSON.parse(savedConversationsString);
-            const targetConversation = savedConversations.find(
-              (conv: {id: string, messages: Message[]}) => conv.id === urlConvId
+          const targetConversation = savedConversations.find(
+            (conv: { id: string; messages: Message[] }) => conv.id === urlConvId
+          );
+          if (targetConversation) {
+            setMessages(targetConversation.messages);
+            console.log(
+              `Loaded conversation: ${urlConvId} with ${targetConversation.messages.length} messages`
             );
-            
-            if (targetConversation) {
-              setMessages(targetConversation.messages);
-              console.log(`Loaded conversation: ${urlConvId} with ${targetConversation.messages.length} messages`);
-            }
           }
         } else {
-          // Generate a new conversation ID
+          // No conversation in URL -> create new one
           const newConvId = `conv-${Date.now()}`;
           setConversationId(newConvId);
-          
-          // Update URL with the conversation ID
+
           const newUrl = `${window.location.pathname}?conversation=${newConvId}`;
           window.history.pushState({ path: newUrl }, '', newUrl);
         }
-        
         setHasLoadedHistory(true);
       } catch (error) {
         console.error('Failed to load conversation history:', error);
@@ -99,379 +100,330 @@ export default function Home() {
     }
   }, [hasLoadedHistory]);
 
-  // Save conversation to localStorage whenever messages change
+  // 3) Save conversation to localStorage whenever messages change
   useEffect(() => {
-    if (hasLoadedHistory && messages.length > 1) { // Don't save if it's just the welcome message
+    if (hasLoadedHistory && messages.length > 1) {
       try {
-        // Get existing conversations
         const savedConversationsString = localStorage.getItem(STORAGE_KEY);
-        let savedConversations = savedConversationsString 
-          ? JSON.parse(savedConversationsString) 
+        let savedConversations = savedConversationsString
+          ? JSON.parse(savedConversationsString)
           : [];
-        
-        // Find if current conversation exists
+
+        // find existing or create new
         const existingConvIndex = savedConversations.findIndex(
-          (conv: {id: string}) => conv.id === conversationId
+          (conv: { id: string }) => conv.id === conversationId
         );
-        
+
         if (existingConvIndex >= 0) {
-          // Update existing conversation
           savedConversations[existingConvIndex].messages = messages;
           savedConversations[existingConvIndex].lastUpdated = Date.now();
         } else {
-          // Add new conversation
           savedConversations.push({
             id: conversationId,
             messages,
-            lastUpdated: Date.now()
+            lastUpdated: Date.now(),
           });
         }
-        
-        // Sort by last updated
+
+        // sort by last updated
         savedConversations.sort((a: any, b: any) => b.lastUpdated - a.lastUpdated);
-        
-        // Keep only the latest MAX_STORED_CONVERSATIONS
+        // keep only 10
         savedConversations = savedConversations.slice(0, MAX_STORED_CONVERSATIONS);
-        
-        // Save back to localStorage
+
         localStorage.setItem(STORAGE_KEY, JSON.stringify(savedConversations));
+        setStoredConversations(savedConversations);
       } catch (error) {
         console.error('Failed to save conversation history:', error);
       }
     }
   }, [messages, conversationId, hasLoadedHistory]);
 
-  // Auto-scroll to bottom when messages change
+  // 4) Scroll to bottom on messages change
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  // Auto-resize textarea as user types
+  // 5) Auto-resize textarea
   useEffect(() => {
     const textarea = inputRef.current;
     if (textarea) {
-      // Reset height to auto to get correct scrollHeight
       textarea.style.height = 'auto';
-      // Set new height based on content (min 24px, max 200px)
       const newHeight = Math.min(Math.max(textarea.scrollHeight, 24), 200);
       textarea.style.height = `${newHeight}px`;
-      
-      // Add scrollbar if content exceeds max height
       textarea.style.overflowY = newHeight >= 200 ? 'auto' : 'hidden';
     }
   }, [text]);
 
-  // Start a new conversation
+  // Helpers
   const startNewConversation = () => {
     const newConvId = `conv-${Date.now()}`;
     setConversationId(newConvId);
-    
-    // Update URL with the new conversation ID
+
     const newUrl = `${window.location.pathname}?conversation=${newConvId}`;
     window.history.pushState({ path: newUrl }, '', newUrl);
-    
-    // Reset messages to just the welcome message
+
     setMessages([
       {
         id: 'welcome',
         type: 'assistant',
-        content: 'Welcome to Summify! 👋\n\nPaste any code, documentation, or technical content, and I\'ll provide you with a concise summary. You can send large files or snippets, and I\'ll handle the processing automatically.'
-      }
+        content:
+          "Welcome to Summify! 👋\n\nPaste any code, documentation, or technical content, and I'll provide you with a concise summary. You can send large files or snippets, and I'll handle the processing automatically.",
+      },
     ]);
   };
 
-  // Reset textarea after submission
   const resetTextarea = () => {
     if (inputRef.current) {
       inputRef.current.style.height = 'auto';
       inputRef.current.style.height = '56px';
       inputRef.current.style.overflowY = 'hidden';
-      // Keep focus on the textarea
       setTimeout(() => {
         inputRef.current?.focus();
       }, 0);
     }
   };
 
+  // 6) Sending a message
   const handleSubmit = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    
-    if (!text.trim()) {
-      return;
-    }
-    
-    // Add user message
+    if (!text.trim()) return;
+
     const userMessage: Message = {
       id: Date.now().toString(),
       type: 'user',
       content: text.trim(),
-      timestamp: Date.now()
+      timestamp: Date.now(),
     };
-    
-    setMessages(prev => [...prev, userMessage]);
+
+    setMessages((prev) => [...prev, userMessage]);
     setText('');
     setLoading(true);
     setError('');
     setTextTruncated(false);
-    setProcessingProgress(null);
-    
-    // Reset textarea height after sending
-    resetTextarea();
-    
-    // Get the backend URL from environment variable
-    const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:3001';
-    
+
+    // Immediately set processing state to show the UI indicator
+    setProcessingProgress({
+      status: 'processing',
+      progress: 5,
+      currentChunk: 0,
+      totalChunks: 1,
+      stage: 'initial',
+      overallProgress: 5,
+      message: 'Initializing...',
+    });
+
     // Create placeholder for assistant response
     const placeholderId = `placeholder-${Date.now()}`;
     const placeholderMessage: Message = {
       id: placeholderId,
       type: 'assistant',
       content: 'Processing your content...',
-      timestamp: Date.now()
+      timestamp: Date.now(),
     };
-    
-    setMessages(prev => [...prev, placeholderMessage]);
+
+    setMessages((prev) => [...prev, placeholderMessage]);
+
+    resetTextarea();
+
+    const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:3001';
 
     try {
-      // Use Server-Sent Events for streaming
-      console.log(`Attempting to connect to ${backendUrl}/api/summarize with ${userMessage.content.length} characters of text`);
-      
-      // First, make a POST request to initiate the session
-      console.log('Making initial POST request to create session ID');
+      // 1) POST create session
+      console.log(
+        `Creating session at ${backendUrl}/api/create-session with ${userMessage.content.length} chars, mode: ${viewMode}`
+      );
       const sessionResponse = await fetch(`${backendUrl}/api/create-session`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ 
+        body: JSON.stringify({
           text: userMessage.content,
-          mode: viewMode
+          mode: viewMode,
         }),
       });
-      
+
       if (!sessionResponse.ok) {
-        throw new Error(`Failed to create session: ${sessionResponse.status} ${sessionResponse.statusText}`);
+        throw new Error(
+          `Failed to create session: ${sessionResponse.status} ${sessionResponse.statusText}`
+        );
       }
-      
+
       const sessionData = await sessionResponse.json();
-      console.log('Session created with ID:', sessionData.sessionId);
-      
-      // Then connect to SSE endpoint with just the session ID
-      const eventSource = new EventSource(`${backendUrl}/api/summarize-stream?sessionId=${sessionData.sessionId}`);
-      let finalData: any = {};
-      let summary = '';
-      
-      console.log('EventSource instance created with session ID, adding event listeners...');
-      
-      // Set a timeout to detect initial connection issues
+      console.log('Session created with ID:', sessionData.sessionId, 'mode:', sessionData.mode);
+
+      // 2) SSE streaming
+      const eventSource = new EventSource(
+        `${backendUrl}/api/summarize-stream?sessionId=${sessionData.sessionId}`
+      );
+      let finalSummary = '';
+      let hasReceivedAnyEvent = false;
+
+      // if no event after 10s, assume connection failure
       const connectionTimeout = setTimeout(() => {
-        if (!summary && !error) {
-          console.error('Connection timeout reached after 10 seconds with no events received');
-          setError("Unable to establish connection to the server. Please try again.");
+        if (!finalSummary && !error) {
+          console.error('Connection timeout: no SSE events within 10s');
+          setError('Unable to connect to the server. Please try again.');
           eventSource.close();
         }
-      }, 10000); // 10 seconds timeout
-      
-      // Connection open event
+      }, 10000);
+
       eventSource.onopen = () => {
-        console.log('EventSource connection opened successfully');
+        console.log('SSE connection opened');
       };
-      
-      // Handle different event types
-      eventSource.addEventListener('processing', (event: MessageEvent) => {
-        const data = JSON.parse(event.data);
-        console.log('Processing event received:', data);
-        // Clear the connection timeout since we received an event
+
+      // -------------- EVENT LISTENERS -------------- //
+
+      // "processing" event
+      eventSource.addEventListener('processing', (ev: MessageEvent) => {
+        hasReceivedAnyEvent = true;
         clearTimeout(connectionTimeout);
+        console.log('processing event:', ev.data);
+
+        // If we want, show an initial 5% or so
+        setProcessingProgress(() => ({
+          status: 'processing',
+          progress: 5,
+          currentChunk: 0,
+          totalChunks: 1,
+          stage: 'initial',
+          overallProgress: 5,
+          message: "We've started summarizing...",
+        }));
       });
-      
-      // Handle heartbeat to keep connection alive
-      eventSource.addEventListener('heartbeat', (event: MessageEvent) => {
-        console.log('Heartbeat received at', new Date().toISOString());
+
+      // "heartbeat" event
+      eventSource.addEventListener('heartbeat', (ev: MessageEvent) => {
+        console.log('heartbeat:', ev.data, new Date().toISOString());
       });
-      
-      // Handle info messages
-      eventSource.addEventListener('info', (event: MessageEvent) => {
-        const data = JSON.parse(event.data);
-        console.log('Info:', data);
-        
-        // Use simpler progress tracking with fewer UI updates
-        // Only update UI for major state changes
+
+      // "info" event
+      eventSource.addEventListener('info', (ev: MessageEvent) => {
+        hasReceivedAnyEvent = true;
+        clearTimeout(connectionTimeout);
+        const data = JSON.parse(ev.data);
+        console.log('info:', data);
+
         if (data.message?.includes('Document split into')) {
-          setProcessingProgress(prev => ({
+          setProcessingProgress(() => ({
             status: 'processing',
             progress: 10,
             currentChunk: 0,
-            totalChunks: 1,
+            totalChunks: data.chunkCount || 1,
             stage: 'splitting',
             overallProgress: 10,
-            message: data.message
+            message: data.message,
           }));
-        } 
-        else if (data.message?.includes('Creating final summary')) {
-          setProcessingProgress(prev => ({
+        } else if (data.message?.includes('Creating final summary')) {
+          setProcessingProgress(() => ({
             status: 'processing',
             progress: 80,
             currentChunk: 1,
-            totalChunks: 1,
+            totalChunks: data.chunkCount || 1,
             stage: 'finalizing',
             overallProgress: 80,
-            message: 'Creating final summary...'
+            message: 'Creating final summary...',
           }));
-        }
-        // Only other essential updates, skip minor ones
-        else if (data.message && data.message.includes('batches')) {
-          setProcessingProgress(prev => ({
-            ...prev || {
-              status: 'processing',
-              progress: 30,
-              currentChunk: 0,
-              totalChunks: 1,
-            },
+        } else if (data.message && data.message.includes('batches')) {
+          setProcessingProgress(() => ({
+            status: 'processing',
+            progress: 30,
+            currentChunk: 0,
+            totalChunks: data.chunkCount || 1,
             stage: 'processing',
             overallProgress: 30,
-            message: data.message
+            message: data.message,
+          }));
+        } else {
+          // Fallback for other messages
+          setProcessingProgress(() => ({
+            status: 'processing',
+            progress: 5,
+            currentChunk: 0,
+            totalChunks: data.chunkCount || 1,
+            stage: 'initial',
+            overallProgress: 5,
+            message: data.message || 'Summarizing...',
           }));
         }
       });
-      
-      // Handle warning messages
-      eventSource.addEventListener('warning', (event: MessageEvent) => {
-        const data = JSON.parse(event.data);
-        console.warn('Warning:', data);
-        
-        // Add a warning banner instead of modifying the content
+
+      // "warning" event
+      eventSource.addEventListener('warning', (ev: MessageEvent) => {
+        const data = JSON.parse(ev.data);
+        console.warn('warning:', data);
         setError(`Warning: ${data.message}`);
       });
-      
-      // Handle progress updates - with throttling
+
+      // "progress" event
       let lastProgressUpdate = 0;
-      eventSource.addEventListener('progress', (event: MessageEvent) => {
-        const data = JSON.parse(event.data);
-        const now = Date.now();
-        
-        // Throttle progress updates to at most 1 per second to reduce rendering overhead
-        if (now - lastProgressUpdate < 1000) {
-          return;
-        }
-        lastProgressUpdate = now;
-        
-        // Clear the connection timeout since we received an event
+      eventSource.addEventListener('progress', (ev: MessageEvent) => {
+        hasReceivedAnyEvent = true;
         clearTimeout(connectionTimeout);
-        
-        // Simplified progress calculation with fewer steps
-        let overallProgress = 10; // Start at 10% for document splitting
-        
+        const data = JSON.parse(ev.data);
+        const now = Date.now();
+
+        if (now - lastProgressUpdate < 1000) return;
+        lastProgressUpdate = now;
+
+        let overallProgress = 10;
         if (data.progress) {
-          // Map chunk progress to 10%-80% range
-          overallProgress = 10 + (data.progress / 100 * 70);
+          overallProgress = 10 + (data.progress / 100) * 70; // from 10% to 80%
         }
-        
-        setProcessingProgress(prev => ({
-          ...prev || {
-            status: 'processing',
-            totalChunks: 1
-          },
+        setProcessingProgress((prev) => ({
+          ...(prev || { status: 'processing', totalChunks: data.totalChunks || 1 }),
           stage: 'processing',
           progress: data.progress || 0,
           currentChunk: data.chunkIndex + 1 || 1,
           totalChunks: data.totalChunks || 1,
           overallProgress: Math.round(overallProgress),
-          message: data.message || `Processing content...`
+          message: data.message || 'Processing content...',
         }));
       });
-      
-      eventSource.addEventListener('result', (event: MessageEvent) => {
-        const data = JSON.parse(event.data);
-        // Clear the connection timeout since we received the final result
+
+      // "result" event (final chunk or single-chunk result)
+      eventSource.addEventListener('result', (ev: MessageEvent) => {
+        hasReceivedAnyEvent = true;
         clearTimeout(connectionTimeout);
-        
-        finalData = data;
-        summary = data.summary;
-        
-        // Create final assistant message with the summary
+        const data = JSON.parse(ev.data);
+        finalSummary = data.summary || '';
+
+        // Insert final summary into messages and remove placeholder
         const assistantMessage: Message = {
-          id: (Date.now() + 1).toString(),
+          id: `assistant-final-${Date.now()}`,
           type: 'assistant',
-          content: summary,
-          contentType: finalData.contentType,
-          timestamp: Date.now()
+          content: finalSummary,
+          contentType: data.contentType,
+          mode: data.mode || viewMode,
+          timestamp: Date.now(),
         };
         
-        // Replace placeholder with actual response
-        setMessages(prev => prev.map(msg => 
-          msg.id === placeholderId ? assistantMessage : msg
-        ));
-        
-        setProcessingProgress(null);
-        
-        // Close the connection once we have the result
-        eventSource.close();
-      });
-      
-      eventSource.addEventListener('error', (event: MessageEvent) => {
-        // Clear the connection timeout since we received an event (even if it's an error)
-        clearTimeout(connectionTimeout);
-        
-        console.error('SSE Error:', event);
-        
-        // Try to parse error data if available
-        let errorMessage = 'An error occurred during processing';
-        try {
-          if (event.data) {
-            const errorData = JSON.parse(event.data);
-            errorMessage = errorData.error || errorMessage;
-            
-            // Add more context for timeout errors
-            if (errorData.isTimeout) {
-              errorMessage += ' Try splitting your document into smaller sections.';
-            }
-          }
-        } catch (e) {
-          // Use default error message if parsing fails
-        }
-        
-        setError(errorMessage);
-        setMessages(prev => prev.filter(msg => msg.id !== placeholderId));
-        eventSource.close();
-      });
-      
-      // Handle connection errors
-      eventSource.onerror = (err) => {
-        // Clear the connection timeout since we received an event (even if it's an error)
-        clearTimeout(connectionTimeout);
-        
-        console.error('EventSource connection error:', err);
-        console.error('EventSource readyState:', eventSource.readyState);
-        // 0 = CONNECTING, 1 = OPEN, 2 = CLOSED
-        
-        let errorMsg = 'Connection to the server failed.';
-        if (eventSource.readyState === 2) {
-          errorMsg += ' The connection was closed unexpectedly.';
-        } else if (eventSource.readyState === 0) {
-          errorMsg += ' Unable to establish connection to the server.';
-        }
-        
-        errorMsg += ' This may happen with very large documents. Try breaking your content into smaller chunks.';
-        
-        setError(errorMsg);
-        setMessages(prev => prev.filter(msg => msg.id !== placeholderId));
-        eventSource.close();
-      };
+        // Replace the placeholder message with the final summary
+        setMessages((prev) => {
+          // Find and remove the placeholder message
+          const withoutPlaceholder = prev.filter(m => !m.id.startsWith('placeholder-'));
+          // Add the final summary
+          return [...withoutPlaceholder, assistantMessage];
+        });
 
-      // Handle chunk summaries
-      eventSource.addEventListener('chunk', (event: MessageEvent) => {
-        const data = JSON.parse(event.data);
-        console.log('Chunk summary received:', data);
-        
-        // Update chunk summaries map
-        setChunkSummaries(prev => {
+        setProcessingProgress(null);
+        eventSource.close();
+      });
+
+      // "chunk" event (partial summaries)
+      eventSource.addEventListener('chunk', (ev: MessageEvent) => {
+        hasReceivedAnyEvent = true;
+        clearTimeout(connectionTimeout);
+
+        const data = JSON.parse(ev.data);
+        console.log('chunk event:', data);
+
+        setChunkSummaries((prev) => {
           const newMap = new Map(prev);
           newMap.set(data.chunkIndex, data.summary);
           return newMap;
         });
-        
-        // Create or update message for this chunk
+
         const chunkMessage: Message = {
           id: `chunk-${data.chunkIndex}`,
           type: 'assistant',
@@ -479,38 +431,76 @@ export default function Home() {
           chunkIndex: data.chunkIndex,
           totalChunks: data.totalChunks,
           mode: data.mode || viewMode,
-          timestamp: Date.now()
+          timestamp: Date.now(),
         };
-        
-        setMessages(prev => {
-          // Remove any existing message for this chunk and the placeholder message
-          const filtered = prev.filter(msg => 
-            msg.id !== `chunk-${data.chunkIndex}` && 
-            msg.id !== placeholderId
-          );
-          // Add the new chunk message
-          return [...filtered, chunkMessage];
+
+        // Insert or update chunk message
+        setMessages((prev) => {
+          const existingIndex = prev.findIndex((m) => m.id === `chunk-${data.chunkIndex}`);
+          if (existingIndex >= 0) {
+            const newMessages = [...prev];
+            newMessages[existingIndex] = chunkMessage;
+            return newMessages;
+          } else {
+            return [...prev, chunkMessage];
+          }
         });
       });
-      
-      // Handle completion event
-      eventSource.addEventListener('complete', (event: MessageEvent) => {
-        const data = JSON.parse(event.data);
-        console.log('Processing completed:', data);
+
+      // "complete" event
+      eventSource.addEventListener('complete', (ev: MessageEvent) => {
+        console.log('complete event:', ev.data);
         setLoading(false);
         setProcessingProgress(null);
       });
+
+      // SSE "error" event
+      eventSource.addEventListener('error', (ev: MessageEvent) => {
+        clearTimeout(connectionTimeout);
+        console.error('SSE error event:', ev);
+
+        let errorMessage = 'An error occurred during processing';
+        try {
+          if (ev.data) {
+            const errorData = JSON.parse(ev.data);
+            errorMessage = errorData.error || errorMessage;
+            if (errorData.isTimeout) {
+              errorMessage += ' Try splitting your document into smaller sections.';
+            }
+          }
+        } catch {
+          /* do nothing */
+        }
+        setError(errorMessage);
+        eventSource.close();
+      });
+
+      // Raw onerror
+      eventSource.onerror = (err) => {
+        console.error('EventSource.onerror triggered:', err, 'readyState:', eventSource.readyState);
+        clearTimeout(connectionTimeout);
+
+        let errorMsg = 'Connection to the server failed.';
+        if (eventSource.readyState === 2) {
+          errorMsg += ' The connection was closed unexpectedly.';
+        } else if (eventSource.readyState === 0) {
+          errorMsg += ' Unable to establish connection.';
+        }
+        errorMsg +=
+          ' This may happen with very large documents. Try splitting your content into smaller chunks.';
+
+        setError(errorMsg);
+        eventSource.close();
+      };
     } catch (err) {
-      console.error('Exception in EventSource setup:', err);
-      setError(err instanceof Error ? err.message : 'An error occurred');
-      // Remove placeholder message on error
-      setMessages(prev => prev.filter(msg => !msg.id.startsWith('placeholder-')));
+      console.error('Exception in SSE setup:', err);
+      setError(err instanceof Error ? err.message : 'An unknown error occurred');
     } finally {
       setLoading(false);
     }
   };
 
-  // Handle Enter key press to submit
+  // Press Enter => submit
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -518,21 +508,19 @@ export default function Home() {
     }
   };
 
-  // Load a specific conversation
+  // 7) Load a specific conversation from localStorage
   const loadConversation = (convId: string) => {
     try {
       const savedConversationsString = localStorage.getItem(STORAGE_KEY);
       if (savedConversationsString) {
         const savedConversations = JSON.parse(savedConversationsString);
         const targetConversation = savedConversations.find(
-          (conv: {id: string, messages: Message[]}) => conv.id === convId
+          (conv: { id: string; messages: Message[] }) => conv.id === convId
         );
-        
         if (targetConversation) {
           setConversationId(convId);
           setMessages(targetConversation.messages);
-          
-          // Update URL
+
           const newUrl = `${window.location.pathname}?conversation=${convId}`;
           window.history.pushState({ path: newUrl }, '', newUrl);
         }
@@ -542,7 +530,7 @@ export default function Home() {
     }
   };
 
-  // Get stored conversations
+  // Helper to get stored conversation list
   const getStoredConversations = () => {
     try {
       const savedConversationsString = localStorage.getItem(STORAGE_KEY);
@@ -555,10 +543,12 @@ export default function Home() {
     return [];
   };
 
+  // Load conversation list initially
   useEffect(() => {
     setStoredConversations(getStoredConversations());
   }, []);
 
+  // 8) Render
   return (
     <div className="min-h-screen flex flex-col">
       <div className="flex flex-col flex-1 w-full mx-auto">
@@ -569,31 +559,39 @@ export default function Home() {
           <p className="text-gray-400 mt-1 text-sm">
             AI-powered documentation and code summarization
           </p>
-          
+
           {/* Conversation history dropdown */}
           <div className="mt-4 flex justify-center">
             <div className="relative inline-block text-left">
-              <div>
-                <button 
-                  type="button" 
-                  className="inline-flex justify-center rounded-md border border-gray-700 px-4 py-1.5 bg-gray-800 text-sm font-medium text-gray-300 hover:bg-gray-700 transition-colors"
-                  id="menu-button" 
-                  aria-expanded="true" 
-                  aria-haspopup="true"
-                  onClick={() => setShowConversationMenu(!showConversationMenu)}
+              <button
+                type="button"
+                className="inline-flex justify-center rounded-md border border-gray-700 px-4 py-1.5 bg-gray-800 text-sm font-medium text-gray-300 hover:bg-gray-700 transition-colors"
+                id="menu-button"
+                aria-expanded="true"
+                aria-haspopup="true"
+                onClick={() => setShowConversationMenu(!showConversationMenu)}
+              >
+                Conversation History
+                <svg
+                  className="-mr-1 ml-2 h-5 w-5"
+                  xmlns="http://www.w3.org/2000/svg"
+                  viewBox="0 0 20 20"
+                  fill="currentColor"
+                  aria-hidden="true"
                 >
-                  Conversation History
-                  <svg className="-mr-1 ml-2 h-5 w-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-                    <path fillRule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clipRule="evenodd" />
-                  </svg>
-                </button>
-              </div>
+                  <path
+                    fillRule="evenodd"
+                    d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z"
+                    clipRule="evenodd"
+                  />
+                </svg>
+              </button>
               {showConversationMenu && (
-                <div 
-                  className="absolute right-0 mt-2 w-56 rounded-md shadow-lg bg-gray-800 ring-1 ring-black ring-opacity-5 z-10" 
-                  role="menu" 
-                  aria-orientation="vertical" 
-                  aria-labelledby="menu-button" 
+                <div
+                  className="absolute right-0 mt-2 w-56 rounded-md shadow-lg bg-gray-800 ring-1 ring-black ring-opacity-5 z-10"
+                  role="menu"
+                  aria-orientation="vertical"
+                  aria-labelledby="menu-button"
                   id="conversation-menu"
                 >
                   <div className="py-1" role="none">
@@ -609,25 +607,31 @@ export default function Home() {
                     <div className="border-t border-gray-700 my-1"></div>
                     {storedConversations.length > 0 ? (
                       storedConversations.map((conv: any) => {
-                        // Find the first user message for the title
-                        const firstUserMsg = conv.messages.find((m: Message) => m.type === 'user');
-                        const title = firstUserMsg 
-                          ? firstUserMsg.content.substring(0, 30) + (firstUserMsg.content.length > 30 ? '...' : '') 
+                        // label with first user message or fallback
+                        const firstUserMsg = conv.messages.find(
+                          (m: Message) => m.type === 'user'
+                        );
+                        const title = firstUserMsg
+                          ? firstUserMsg.content.substring(0, 30) +
+                            (firstUserMsg.content.length > 30 ? '...' : '')
                           : 'Conversation';
-                        
-                        // Format date
+
                         const date = new Date(conv.lastUpdated);
                         const formattedDate = date.toLocaleDateString(undefined, {
                           month: 'short',
                           day: 'numeric',
                           hour: '2-digit',
-                          minute: '2-digit'
+                          minute: '2-digit',
                         });
-                        
+
                         return (
                           <button
                             key={conv.id}
-                            className={`${conv.id === conversationId ? 'bg-gray-700 text-white' : 'text-gray-300'} hover:bg-gray-700 hover:text-white block px-4 py-2 text-sm w-full text-left`}
+                            className={`${
+                              conv.id === conversationId
+                                ? 'bg-gray-700 text-white'
+                                : 'text-gray-300'
+                            } hover:bg-gray-700 hover:text-white block px-4 py-2 text-sm w-full text-left`}
                             onClick={() => {
                               setShowConversationMenu(false);
                               loadConversation(conv.id);
@@ -654,44 +658,61 @@ export default function Home() {
             {messages.length === 0 && (
               <div className="flex flex-col items-center justify-center h-full text-gray-500 py-12">
                 <div className="glass-card p-8 max-w-md text-center">
-                  <svg xmlns="http://www.w3.org/2000/svg" className="h-12 w-12 mx-auto mb-4 opacity-50" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    className="h-12 w-12 mx-auto mb-4 opacity-50"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={1.5}
+                      d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
+                    />
                   </svg>
                   <h2 className="text-xl font-semibold mb-2 text-gray-300">Welcome to Summify</h2>
-                  <p>Paste any code, documentation, or technical content below to get an AI-powered summary.</p>
+                  <p>
+                    Paste any code, documentation, or technical content below to get an AI-powered
+                    summary.
+                  </p>
                 </div>
               </div>
             )}
 
             {messages.map((message) => (
-              <div 
+              <div
                 key={message.id}
-                className={`mb-6 flex ${message.type === 'user' ? 'justify-end' : 'justify-start'}`}
+                className={`mb-6 flex ${
+                  message.type === 'user' ? 'justify-end' : 'justify-start'
+                }`}
               >
-                <div 
+                <div
                   className={`max-w-[85%] px-4 py-3 ${
-                    message.type === 'user'
-                      ? 'user-message'
-                      : 'assistant-message'
+                    message.type === 'user' ? 'user-message' : 'assistant-message'
                   }`}
                 >
                   {message.type === 'user' ? (
-                    <div className="whitespace-pre-wrap overflow-auto max-h-[70vh]">{message.content}</div>
+                    <div className="whitespace-pre-wrap overflow-auto max-h-[70vh]">
+                      {message.content}
+                    </div>
                   ) : (
                     <div className="markdown-content overflow-auto max-h-[70vh]">
                       <div className="flex items-center mb-2">
-                        {message.chunkIndex ? (
+                        {message.chunkIndex !== undefined && (
                           <div className="text-sm text-gray-400 mr-2">
                             Chunk {message.chunkIndex} of {message.totalChunks}
                           </div>
-                        ) : null}
-                        
+                        )}
                         {message.mode && (
-                          <div className={`text-xs font-medium px-2 py-0.5 rounded-full ${
-                            message.mode === 'dev' 
-                              ? 'bg-blue-900/50 text-blue-300' 
-                              : 'bg-purple-900/50 text-purple-300'
-                          }`}>
+                          <div
+                            className={`text-xs font-medium px-2 py-0.5 rounded-full ${
+                              message.mode === 'dev'
+                                ? 'bg-blue-900/50 text-blue-300'
+                                : 'bg-purple-900/50 text-purple-300'
+                            }`}
+                          >
                             {message.mode === 'dev' ? 'Developer' : 'Project Manager'}
                           </div>
                         )}
@@ -703,17 +724,18 @@ export default function Home() {
               </div>
             ))}
 
+            {/* The "AI Processing" card if loading is true */}
             {loading && (
               <div className="mb-6 flex justify-start">
                 <div className="glass-card rounded-2xl px-6 py-4 max-w-md w-full">
-                  {/* Modern header with pulse animation */}
+                  {/* Summarizing or Processing label */}
                   <div className="flex items-center mb-3">
                     <div className="relative mr-3">
                       <div className="w-3 h-3 rounded-full bg-indigo-500"></div>
                       <div className="absolute inset-0 w-3 h-3 rounded-full bg-indigo-500 animate-ping opacity-75"></div>
                     </div>
                     <span className="text-sm font-medium text-indigo-400">
-                      AI Processing
+                      Summarizing...
                     </span>
                     {processingProgress?.overallProgress ? (
                       <span className="ml-auto text-sm font-medium text-gray-300">
@@ -722,25 +744,21 @@ export default function Home() {
                     ) : null}
                   </div>
 
-                  {/* Progress indicator - simplified version */}
+                  {/* Simplified progress indicator */}
                   {processingProgress?.overallProgress ? (
                     <div className="w-full space-y-2 my-4">
                       <div className="flex justify-between text-xs text-gray-500">
                         <span>Processing</span>
                         <span>{processingProgress.overallProgress}%</span>
                       </div>
-                      
-                      {/* Simpler progress bar with minimal update */}
                       <div className="h-1 w-full bg-gray-200 rounded-full overflow-hidden">
-                        <div 
+                        <div
                           className="h-full bg-indigo-500 transition-all duration-300 ease-in-out"
-                          style={{ width: `${processingProgress?.overallProgress || 0}%` }}
+                          style={{ width: `${processingProgress.overallProgress || 0}%` }}
                         />
                       </div>
-                      
-                      {/* Simplified status message */}
                       <div className="text-xs text-gray-500 text-center animate-pulse">
-                        {processingProgress?.message || "Processing your content..."}
+                        {processingProgress?.message || 'Summarizing your content...'}
                       </div>
                     </div>
                   ) : (
@@ -759,7 +777,7 @@ export default function Home() {
                 </div>
               </div>
             )}
-            
+
             <div ref={messagesEndRef} />
           </div>
 
@@ -772,8 +790,8 @@ export default function Home() {
                   <button
                     onClick={() => setViewMode('dev')}
                     className={`px-4 py-1.5 rounded-full text-sm font-medium transition-all ${
-                      viewMode === 'dev' 
-                        ? 'bg-indigo-500 text-white' 
+                      viewMode === 'dev'
+                        ? 'bg-indigo-500 text-white'
                         : 'text-gray-300 hover:text-white'
                     }`}
                   >
@@ -782,8 +800,8 @@ export default function Home() {
                   <button
                     onClick={() => setViewMode('pm')}
                     className={`px-4 py-1.5 rounded-full text-sm font-medium transition-all ${
-                      viewMode === 'pm' 
-                        ? 'bg-indigo-500 text-white' 
+                      viewMode === 'pm'
+                        ? 'bg-indigo-500 text-white'
                         : 'text-gray-300 hover:text-white'
                     }`}
                   >
@@ -791,18 +809,14 @@ export default function Home() {
                   </button>
                 </div>
               </div>
-            
-              <form 
-                onSubmit={handleSubmit} 
-                className="relative shadow-lg"
-              >
+
+              <form onSubmit={handleSubmit} className="relative shadow-lg">
                 <div className="relative">
                   <textarea
                     ref={inputRef}
                     value={text}
                     onChange={(e) => {
                       const newText = e.target.value;
-                      // Apply hard limit of 100,000 characters
                       if (newText.length > 100000) {
                         setText(newText.substring(0, 100000));
                         setTextTruncated(true);
@@ -825,12 +839,33 @@ export default function Home() {
                     aria-label="Send message"
                   >
                     {loading ? (
-                      <svg className="animate-spin h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                      <svg
+                        className="animate-spin h-5 w-5 text-white"
+                        xmlns="http://www.w3.org/2000/svg"
+                        fill="none"
+                        viewBox="0 0 24 24"
+                      >
+                        <circle
+                          className="opacity-25"
+                          cx="12"
+                          cy="12"
+                          r="10"
+                          stroke="currentColor"
+                          strokeWidth="4"
+                        ></circle>
+                        <path
+                          className="opacity-75"
+                          fill="currentColor"
+                          d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                        ></path>
                       </svg>
                     ) : (
-                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-6 h-6">
+                      <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        viewBox="0 0 24 24"
+                        fill="currentColor"
+                        className="w-6 h-6"
+                      >
                         <path d="M3.478 2.404a.75.75 0 0 0-.926.941l2.432 7.905H13.5a.75.75 0 0 1 0 1.5H4.984l-2.432 7.905a.75.75 0 0 0 .926.94 60.519 60.519 0 0 0 18.445-8.986.75.75 0 0 0 0-1.218A60.517 60.517 0 0 0 3.478 2.404Z" />
                       </svg>
                     )}
@@ -838,7 +873,8 @@ export default function Home() {
                 </div>
                 {text.length > 75000 && !textTruncated && (
                   <div className="text-amber-400 text-xs mt-1 px-2">
-                    Large text detected ({text.length.toLocaleString()} characters). Consider breaking into smaller parts for better results.
+                    Large text detected ({text.length.toLocaleString()} characters). Consider
+                    breaking into smaller parts for better results.
                   </div>
                 )}
                 {textTruncated && (
