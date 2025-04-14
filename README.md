@@ -1,7 +1,6 @@
 # Summify: AI-Powered Documentation and Code Summarization
 
-
-Summify is an advanced AI tool designed to summarize technical documentation and code, helping developers understand complex codebases faster and more efficiently.
+Summify is an advanced AI tool designed to summarize technical documentation and code, helping developers understand complex codebases faster and more efficiently. It offers both developer-focused and product manager-focused summaries.
 
 ## 🌟 [Live Demo](https://summify-seven.vercel.app/)
 
@@ -9,11 +8,15 @@ Try it out: [https://summify-seven.vercel.app/](https://summify-seven.vercel.app
 
 ## 📋 Features
 
+- **Dual Summarization Modes**: 
+  - **Developer Mode**: Technical, implementation-focused summaries for developers
+  - **Product Manager Mode**: Business-focused assessments for strategic planning
 - **Smart Summarization**: Quickly extract key insights from large technical documents or codebases
 - **Structured Output**: Summaries include key takeaways, core concepts, implementation steps, and more
 - **Context-Aware**: Intelligently identifies whether content is code or documentation and adapts accordingly
-- **Large Text Support**: Handles large inputs by breaking them into manageable chunks and synthesizing the results
+- **Large Text Support**: Handles large inputs by breaking them into manageable chunks with intelligent boundary detection
 - **Modern UI**: Chat-style interface with responsive design that works across devices
+- **Server-Sent Events**: Real-time progress updates during summarization
 
 ## 🏗️ Architecture
 
@@ -23,11 +26,15 @@ Summify is built with a modern, separated frontend and backend architecture:
 - **Next.js**: Static site built with React and Next.js for a fast, responsive UI
 - **TailwindCSS**: Utility-first CSS framework for styling
 - **React Markdown**: For rendering formatted summaries
+- **SSE Client**: For receiving real-time updates from the backend
 
 ### Backend
 - **Node.js/Express**: Handles API requests and processing
 - **Anthropic Claude API**: Powers the AI summarization capabilities
-- **Smart Chunking**: Proprietary algorithm for processing large texts efficiently
+- **Claude 3.5 Haiku**: Latest model for efficient and accurate summaries
+- **Fixed-Size Chunking**: Intelligent algorithm with natural boundary detection for processing large texts
+- **Rate Limiting**: Built-in rate limiting to comply with Claude API limits (5 RPM)
+- **Server-Sent Events**: For streaming progress updates to the client
 
 ## 🚀 Getting Started
 
@@ -58,7 +65,7 @@ echo "PORT=3001" >> .env
 echo "FRONTEND_URL=http://localhost:3000" >> .env
 
 # Start the backend server
-npm run dev
+npm start
 ```
 
 3. **Set up the Frontend**
@@ -80,18 +87,32 @@ Open your browser and go to http://localhost:3000
 
 ## 📝 How It Works
 
-1. **Input**: Paste your code or documentation into the text area
+1. **Input**: Paste your code or documentation into the text area and select mode (Developer or Product Manager)
 2. **Processing**: 
-   - For small content (<10,000 characters): Direct summarization
-   - For large content: Intelligent chunking and meta-summarization
-3. **Output**: Receive a structured summary with:
-   - Key Takeaways
-   - Core Concepts
-   - Implementation Path
-   - Time-Saving Patterns
-   - Risk Mitigation
-   - Problem Areas
-   - Business Impact
+   - Text is analyzed and chunked if necessary (fixed 64K character chunks with natural boundaries)
+   - Each chunk is processed in parallel through the Claude API
+   - Server sends real-time progress updates to the client
+3. **Output**: Receive a structured summary based on the selected mode:
+
+   **Developer Mode**:
+   - TL;DR Overview
+   - Core Components
+   - Implementation Guide
+   - Dependencies & Prerequisites
+   - Key Design Patterns & Architecture
+   - Gotchas & Edge Cases
+   - Debugging & Troubleshooting
+   - Performance Considerations
+
+   **Product Manager Mode**:
+   - TL;DR Business Value
+   - Core Components & Business Value
+   - Implementation Roadmap
+   - Resource Requirements & Budget
+   - Strategic Considerations
+   - Risk Assessment
+   - Operational Readiness
+   - Business Outcomes & Success Metrics
 
 ## 🌐 Deployment
 
@@ -118,9 +139,11 @@ Open your browser and go to http://localhost:3000
 
 ## 🔧 Technical Details
 
-- **Smart Chunking**: The backend intelligently breaks large texts at meaningful boundaries (paragraphs, code blocks, headers) to preserve context
-- **Meta-Summarization**: For multi-chunk processing, each chunk is summarized individually, then a meta-summary combines the insights
-- **Exponential Backoff**: Built-in retry mechanism for API calls with intelligent backoff strategy
+- **Advanced Chunking Logic**: Texts are split into 64K character chunks, with intelligent boundary detection at paragraph, line, or sentence breaks
+- **Parallel Processing**: Multiple chunks are processed simultaneously for faster results
+- **Server-Sent Events**: Real-time progress updates and individual chunk results streamed to the client
+- **Session Management**: In-memory session management with automatic cleanup of expired sessions
+- **Rate Limiting**: Simple rate limiter ensuring compliance with API limits (5 RPM)
 - **Error Handling**: Comprehensive error handling for API rate limits and service outages
 
 ## 📄 License
